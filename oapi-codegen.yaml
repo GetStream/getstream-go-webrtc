@@ -1,0 +1,16 @@
+# Config for generate.sh. See https://github.com/oapi-codegen/oapi-codegen
+package: models
+output: coordinator/models/models.gen.go
+
+generate:
+  # Models only. The coordinator client is hand-written (coordinator/client.go)
+  # because the SDK calls exactly one endpoint, POST .../join.
+  models: true
+
+output-options:
+  # The websocket-only schemas (WSAuthMessage, ConnectUserDetailsRequest,
+  # ConnectedEvent, OwnUserResponse) are not reachable from any HTTP path, so
+  # the default pruning pass drops them. The SDK needs them.
+  skip-prune: true
+  # Produces ID/UserID/SessionID/APIKey rather than Id/UserId/SessionId/ApiKey.
+  name-normalizer: ToCamelCaseWithInitialisms

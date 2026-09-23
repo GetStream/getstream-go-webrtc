@@ -1,0 +1,58 @@
+name: build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-build:
+    name: 👷 Test & Build ${{ matrix.goVer }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goVer: ['1.27']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go ${{ matrix.goVer }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.goVer }}
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -timeout 10m ./...
+
+  no-private-deps:
+    name: 🔒 No private dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27'
+
+      # This module must stay buildable with a stock Go toolchain.
+      # GetStream/kit and GetStream/video-sfu are not public, so reaching either
+      # one is a build-breaking regression.
+      - name: Assert no GetStream/kit or GetStream/video-sfu in the dep graph
+        run: |
+          if go list -deps ./... | grep -E 'GetStream/(kit|video-sfu)'; then
+            echo "::error::private GetStream dependency reached from this module"
+            exit 1
+          fi

@@ -1,0 +1,7 @@
+.env
+cover.out
+*.test
+dist/
+.idea/
+.vscode/
+.DS_Store
