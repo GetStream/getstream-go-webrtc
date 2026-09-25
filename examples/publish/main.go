@@ -71,10 +71,11 @@ func run() error {
 
 	log.Printf("joined %s as session %s", call.CID(), call.SessionID.Load())
 
+	// Opus is always signalled as opus/48000/2 (RFC 7587), even for mono.
 	codec := webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: 48000,
-		Channels:  1,
+		Channels:  2,
 	}
 	trackInfo := &sfu_models.TrackInfo{
 		TrackId:   uuid.NewString(),

@@ -45,7 +45,7 @@ const DefaultBufferDuration = 30 * time.Second
 // mono voice configuration.
 type WriterConfig struct {
 	// Opus configures the encoder. Its zero value is 48 kHz mono at 20 ms,
-	// which is what WebRTC negotiates.
+	// sent as the opus/48000/2 codec that WebRTC negotiates.
 	Opus opus.Config
 	// BufferDuration caps how much encoded audio is queued. Once it is
 	// exceeded the oldest audio is dropped, which bounds both memory and the
@@ -119,12 +119,15 @@ func NewTrackWriter(cfg WriterConfig) (*TrackWriter, error) {
 }
 
 // Codec is the RTP codec capability this writer produces, ready to hand to
-// [track.NewAudioTrack].
+// [track.NewAudioTrack]. RFC 7587 signals Opus as opus/48000/2 whatever the
+// encoder's channel count, and a mono stream is a valid stream of that codec,
+// so the capability always says two channels: anything else fails to bind to
+// the codec every peer negotiates.
 func (w *TrackWriter) Codec() webrtc.RTPCodecCapability {
 	return webrtc.RTPCodecCapability{
 		MimeType:  webrtc.MimeTypeOpus,
 		ClockRate: OpusClockRate,
-		Channels:  uint16(w.enc.Config().Channels),
+		Channels:  2,
 	}
 }
 
