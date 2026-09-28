@@ -47,7 +47,7 @@ func TestTrackWriterCodec(t *testing.T) {
 		channels     int
 		wantChannels uint16
 	}{
-		{"mono", 1, 1},
+		{"mono", 1, 2}, // RFC 7587: opus/48000/2 whatever the encoder sends
 		{"stereo", 2, 2},
 	}
 
