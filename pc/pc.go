@@ -205,6 +205,11 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	se.DisableSRTPReplayProtection(true)
 	se.DisableSRTCPReplayProtection(true)
 	se.SetDTLSRetransmissionInterval(dtlsRetransmissionInterval)
+	// As DTLS server (the publisher, which the SFU answers with a=setup:active) pion would
+	// answer the first ClientHello with a HelloVerifyRequest, costing a round trip. The ICE
+	// check has already proved the SFU's address, which is what that cookie exchange is
+	// for, and browsers never send one either.
+	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetICETimeouts(params.iceTimeouts())
 
 	// One line per handshake message we send pins down which direction a

@@ -728,6 +728,26 @@ func awaitMigrationCompleteOn(client *signal.Client) *event.EventAwaiter[*sfu_ev
 	})
 }
 
+// UseSFU points the call straight at an SFU with credentials the caller already holds, so
+// Join skips the coordinator's join-call request.
+//
+// It is for development and tests against a locally running SFU, where there is no
+// coordinator to hand out an SFU and a token. Production calls get both from the
+// coordinator and should not use it. Call it before Join. Reconnects keep using the same
+// credentials, since there is no coordinator to ask for new ones.
+func (c *Call) UseSFU(cred models.Credentials) {
+	c.GetCred = func(bool, string) (models.Credentials, error) { return cred, nil }
+	// The reconnect and migration paths read the SFU they were on from here.
+	c.coordinatorState.Store(&CallState{
+		Url:          cred.Server.URL,
+		Token:        cred.Token,
+		WebsocketUrl: cred.Server.WsEndpoint,
+		EdgeName:     cred.Server.EdgeName,
+	})
+	c.getPeer().client.Store(signal.NewClient(cred, c, c.signalOptions()...))
+	c.SetCredentials(cred)
+}
+
 func (c *Call) SetCredentials(cred models.Credentials) {
 	c.logger.Debugf("setting credentials: %#+v", cred)
 	state := c.coordinatorState.Load()
