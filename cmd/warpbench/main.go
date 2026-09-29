@@ -26,9 +26,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/sirupsen/logrus"
 
 	sfu_events "github.com/GetStream/protocol/protobuf/video/sfu/event"
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
@@ -53,6 +53,7 @@ type options struct {
 	location    string
 	out         string
 	debug       bool
+	local       string
 }
 
 // peerResult is one peer connection's setup, in milliseconds from the moment its
@@ -84,6 +85,7 @@ func main() {
 	flag.BoolVar(&o.warp, "warp", false, "offer WARP (DTLS 1.3 and SPED) on both peer connections")
 	flag.StringVar(&o.environment, "environment", "pronto-staging", "pronto environment that issues the tokens")
 	flag.StringVar(&o.location, "location", "IAD", "location hint for the join (an airport code); -sfu overrides the choice")
+	flag.StringVar(&o.local, "local", "", "host:port of a local SFU (DeveloperMode) to use instead of the one the coordinator returns")
 	flag.BoolVar(&o.debug, "debug", false, "log the SDK at debug level to stderr")
 	flag.StringVar(&o.out, "out", "", "write every run as JSON lines to this file")
 	flag.Parse()
@@ -209,7 +211,13 @@ func join(ctx context.Context, o options, callID, userID string) (*participant, 
 		return nil, err
 	}
 	p.sfu = cred.Server.EdgeName
-	if o.sfu != "" && !strings.HasPrefix(o.sfu, strings.TrimSuffix(p.sfu, ".stream-io-video.com")) {
+	if o.local != "" {
+		// Like pronto's sfuUrl and sfuWsUrl: the staging token, a local SFU.
+		cred.Server = models.SFUResponse{EdgeName: "local", URL: "http://" + o.local + "/twirp", WsEndpoint: "ws://" + o.local + "/ws"}
+		cred.IceServers = nil
+		p.sfu = "local"
+	}
+	if o.local == "" && o.sfu != "" && !strings.HasPrefix(o.sfu, strings.TrimSuffix(p.sfu, ".stream-io-video.com")) {
 		client.Close()
 		return nil, fmt.Errorf("asked for SFU %s, the coordinator returned %s", o.sfu, p.sfu)
 	}
