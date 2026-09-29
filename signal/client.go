@@ -105,6 +105,8 @@ type Client struct {
 	lastHealthCheckNanos atomic.Int64
 	conn                 atomic.Pointer[websocket.Connection[sfu_events.SfuEvent, sfu_events.SfuRequest]]
 	cred                 atomic.Pointer[models.Credentials]
+	// dialedAtNanos is when the last websocket to the SFU finished opening.
+	dialedAtNanos atomic.Int64
 
 	disconnected atomic.Bool
 	// detached stops events from reaching the Handler while still recording them
@@ -231,12 +233,23 @@ func (c *Client) SetCredentials(cred models.Credentials) {
 	c.setRPC(c.getSignalRPCClient(cred))
 }
 
+// DialedAt is when the last websocket to the SFU finished opening, or the zero time if
+// none has.
+func (c *Client) DialedAt() time.Time {
+	nanos := c.dialedAtNanos.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
 func (c *Client) Connect(ctx context.Context, joinRequest *sfu_events.JoinRequest) (*sfu_events.JoinResponse, error) {
 	endpoint := c.cred.Load().Server.WsEndpoint
 	wsConn, _, _, err := ws.DefaultDialer.Dial(ctx, endpoint)
 	if err != nil {
 		return nil, err
 	}
+	c.dialedAtNanos.Store(time.Now().UnixNano())
 	c.Tracing.Load().Emit(rtcstats.SignalWSOpenEvent, map[string]any{
 		"url": endpoint,
 	})

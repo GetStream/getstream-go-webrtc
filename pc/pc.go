@@ -74,8 +74,10 @@ type Transport struct {
 	connectTimer   *time.Timer
 	iceStartedAt   time.Time
 	iceConnectedAt time.Time
-	connectedAt    time.Time
-	lastPCState    webrtc.PeerConnectionState
+	// dtlsConnectedAt is when the DTLS handshake finished for the first time.
+	dtlsConnectedAt time.Time
+	connectedAt     time.Time
+	lastPCState     webrtc.PeerConnectionState
 	// lastICEState and lastDTLSState skip the Closed transition that Close
 	// causes, so a snapshot taken afterwards still shows where the connection
 	// stalled.
@@ -118,6 +120,23 @@ type TransportParams struct {
 	IsOfferer bool
 	PeerConfig
 	timeouts *transportTimeouts
+	// OnTimingChange, when set, receives a snapshot each time the transport reaches a
+	// new connection step. It runs on a pion callback goroutine and must not block.
+	OnTimingChange func(Timing)
+}
+
+// Timing is when a transport first reached each step of connecting. A zero time is a
+// step it has not reached. ICE restarts do not move these: they describe how the
+// transport came up in the first place.
+type Timing struct {
+	// ICEChecking is when ICE started checking candidate pairs.
+	ICEChecking time.Time
+	// ICEConnected is when ICE found a working pair.
+	ICEConnected time.Time
+	// DTLSConnected is when the DTLS handshake finished on top of ICE.
+	DTLSConnected time.Time
+	// Connected is when the peer connection reported connected.
+	Connected time.Time
 }
 
 type PeerConfig struct {
@@ -241,7 +260,10 @@ func (p TransportParams) iceTimeouts() (disconnected, failed, keepalive time.Dur
 func (t *Transport) bindCallbacks() {
 	h := t.Params.Handler
 	if dtls := dtlsTransportOf(t.PC); dtls != nil {
-		dtls.OnStateChange(t.onDTLSStateChange)
+		dtls.OnStateChange(func(state webrtc.DTLSTransportState) {
+			t.onDTLSStateChange(state)
+			t.notifyTiming()
+		})
 	}
 	t.PC.OnICEGatheringStateChange(func(state webrtc.ICEGatheringState) {
 		t.Params.Logger.Debugw("ice gathering state change", "state", state.String())
@@ -260,10 +282,12 @@ func (t *Transport) bindCallbacks() {
 	})
 	t.PC.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
 		t.onICEStateChange(state)
+		t.notifyTiming()
 		h.OnICEConnectionStateChange(state)
 	})
 	t.PC.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		t.onPCStateChange(state)
+		t.notifyTiming()
 		h.OnConnectionStateChange(state)
 	})
 	t.PC.OnTrack(h.OnTrack)
@@ -793,6 +817,9 @@ func (t *Transport) onDTLSStateChange(state webrtc.DTLSTransportState) {
 	if state != webrtc.DTLSTransportStateClosed {
 		t.lastDTLSState = state
 	}
+	if state == webrtc.DTLSTransportStateConnected && t.dtlsConnectedAt.IsZero() {
+		t.dtlsConnectedAt = time.Now()
+	}
 	t.mu.Unlock()
 
 	var sinceICEConnected time.Duration
@@ -803,6 +830,25 @@ func (t *Transport) onDTLSStateChange(state webrtc.DTLSTransportState) {
 		logger.DtlsState, state.String(),
 		"sinceICEConnected", sinceICEConnected,
 	)
+}
+
+// Timing returns when the transport first reached each connection step.
+func (t *Transport) Timing() Timing {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return Timing{
+		ICEChecking:   t.iceStartedAt,
+		ICEConnected:  t.iceConnectedAt,
+		DTLSConnected: t.dtlsConnectedAt,
+		Connected:     t.connectedAt,
+	}
+}
+
+// notifyTiming hands the current timing to OnTimingChange, if one is set.
+func (t *Transport) notifyTiming() {
+	if t.Params.OnTimingChange != nil {
+		t.Params.OnTimingChange(t.Timing())
+	}
 }
 
 // connectionInfo snapshots the transport for a failure report. Duration is
