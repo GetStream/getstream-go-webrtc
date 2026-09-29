@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 
 	"github.com/GetStream/getstream-go-webrtc/internal/red"
 	"github.com/GetStream/getstream-go-webrtc/logger"

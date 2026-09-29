@@ -8,7 +8,7 @@ import (
 
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/getstream-go-webrtc/audio"

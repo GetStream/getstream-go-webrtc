@@ -2,7 +2,7 @@ package rtc
 
 import (
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/pc"

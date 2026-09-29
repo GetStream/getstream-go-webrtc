@@ -3,7 +3,7 @@ package sdputil
 
 import (
 	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 )
 
 // GetMidValue returns the a=mid value of a media section, or "" when absent.

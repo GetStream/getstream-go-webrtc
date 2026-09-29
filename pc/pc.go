@@ -11,10 +11,10 @@ import (
 	"github.com/pion/dtls/v4/pkg/crypto/elliptic"
 	"github.com/pion/dtls/v4/pkg/protocol"
 	"github.com/pion/dtls/v4/pkg/protocol/handshake"
-	"github.com/pion/ice/v4"
+	"github.com/pion/ice/v5"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 
 	"github.com/GetStream/getstream-go-webrtc/internal/sdputil"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
@@ -199,9 +199,6 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	se := params.SettingEngine
 	// The caller keeps using the media engine it passed in.
 	se.DisableMediaEngineCopy(true)
-	// The call decides when the peer connection goes away, not a close_notify
-	// from the SFU.
-	se.DisableCloseByDTLS(true)
 	// The SFU gathers no TCP-active candidates to pair with ours.
 	se.DisableActiveTCP(true)
 	// The SFU never uses mDNS candidates, so there is nothing to resolve.
@@ -220,13 +217,11 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	// for, and browsers never send one either.
 	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetICETimeouts(params.iceTimeouts())
-	// Offer the WARP connection setup (draft-uberti-tsvwg-warp) that the SFU negotiates in
-	// band: DTLS 1.3, and DTLS in the ICE checks (SPED). An SFU without them answers as
-	// before, so the connection falls back to DTLS 1.2 after ICE.
-	if err := se.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3); err != nil {
-		return nil, xerr.Wrap(err)
-	}
-	se.EnableSped(true)
+	// Offer DTLS 1.3, the part of the WARP connection setup (draft-uberti-tsvwg-warp) that
+	// pion/webrtc v5 supports. An SFU without it answers with DTLS 1.2. pion/webrtc v5 has
+	// no DTLS in the ICE checks (SPED) yet.
+	se.SetDTLSMinVersion(protocol.Version1_2)
+	se.SetDTLSMaxVersion(protocol.Version1_3)
 
 	// One line per handshake message we send pins down which direction a
 	// stalled handshake lost.

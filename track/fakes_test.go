@@ -11,8 +11,8 @@ import (
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v5"
+	"github.com/pion/webrtc/v5/pkg/media"
 )
 
 // The fakes below stand in for the pieces a PeerConnection would supply after

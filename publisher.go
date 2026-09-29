@@ -15,7 +15,7 @@ import (
 	sfu_signal_rpc "github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
 	"github.com/pion/interceptor"
 	"github.com/pion/interceptor/pkg/stats"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/thesyncim/skipset"
 	"github.com/valyala/bytebufferpool"
 

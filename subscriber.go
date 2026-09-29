@@ -15,7 +15,7 @@ import (
 	"github.com/pion/interceptor/pkg/nack"
 	"github.com/pion/interceptor/pkg/stats"
 	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/thesyncim/skipset"
 	"github.com/valyala/bytebufferpool"
 
@@ -50,8 +50,10 @@ type subscribedTrackEntry struct {
 	TrackID   string
 	StreamID  string
 	TrackType sfu_models.TrackType
-	Codec     webrtc.RTPCodecParameters
-	RID       string
+	// Track gives the codec, which pion/webrtc v5 learns from the first packet, after
+	// OnTrack.
+	Track *webrtc.TrackRemote
+	RID   string
 }
 
 type subscriber struct {
@@ -250,7 +252,7 @@ func (s *subscriber) OnTrack(track *webrtc.TrackRemote, rtpReceiver *webrtc.RTPR
 		StreamID:  track.StreamID(),
 		TrackType: trackType,
 		RID:       track.RID(),
-		Codec:     track.Codec(),
+		Track:     track,
 	}
 	s.subscribedTracks.Set(entry)
 	s.s.OnTrack(OnTrackReceived{
@@ -534,7 +536,7 @@ func (s *subscriber) buildRemoteOutboundRTPStreamStats(ste subscribedTrackEntry,
 		ID:                        fmt.Sprintf("remote-outbound-rtp:%d-%s", ste.SSRC, ste.TrackID),
 		SSRC:                      ste.SSRC,
 		Kind:                      string(getMediaKindFromTrackType(ste.TrackType)),
-		CodecID:                   getCodecStatsID(ste.Codec, codecStats),
+		CodecID:                   getCodecStatsID(ste.Track.Codec(), codecStats),
 		PacketsSent:               SafeUint64ToUint32(collectedStats.RemoteOutboundRTPStreamStats.PacketsSent),
 		BytesSent:                 collectedStats.RemoteOutboundRTPStreamStats.BytesSent,
 		LocalID:                   fmt.Sprintf("inbound-rtp:%d-%s", ste.SSRC, ste.TrackID),
@@ -553,7 +555,7 @@ func (s *subscriber) buildInboundRTPStreamStats(ste subscribedTrackEntry, tm web
 		Type:                        webrtc.StatsTypeInboundRTP,
 		ID:                          fmt.Sprintf("inbound-rtp:%d-%s", ste.SSRC, ste.TrackID),
 		RemoteID:                    fmt.Sprintf("remote-outbound-rtp:%d-%s", ste.SSRC, ste.TrackID),
-		CodecID:                     getCodecStatsID(ste.Codec, codecStats),
+		CodecID:                     getCodecStatsID(ste.Track.Codec(), codecStats),
 		SSRC:                        ste.SSRC,
 		Kind:                        mediaKind,
 		FIRCount:                    collectedStats.InboundRTPStreamStats.FIRCount,

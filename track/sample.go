@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v5/pkg/media"
 )
 
 // SampleProvider feeds a Local track. The track calls NextSample from a single

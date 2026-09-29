@@ -2,7 +2,7 @@ package red
 
 import (
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 )
 
 // maxPayloadSize keeps a RED packet, with its RTP header and extensions,

@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/GetStream/protocol/protobuf/video/sfu/models"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 )
 
 // NegotiationState is where the offering side is in its offer/answer exchange.

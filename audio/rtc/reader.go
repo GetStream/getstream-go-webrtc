@@ -10,7 +10,7 @@ import (
 
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 
 	"github.com/GetStream/getstream-go-webrtc/audio"
 	"github.com/GetStream/getstream-go-webrtc/audio/opus"
@@ -58,7 +58,9 @@ type RTPSource interface {
 type TrackReader struct {
 	src RTPSource
 	dec *opus.Decoder
-	red *red.Decoder
+	// codecOf, when set, gives the codec once the first packet has been read.
+	codecOf func() webrtc.RTPCodecCapability
+	red     *red.Decoder
 
 	conceal    bool
 	maxConceal int
@@ -82,7 +84,17 @@ func NewTrackReader(remote *webrtc.TrackRemote, cfg ReaderConfig) (*TrackReader,
 	if remote == nil {
 		return nil, errors.New("audio/rtc: nil remote track")
 	}
-	return NewRTPReader(remote, remote.Codec().RTPCodecCapability, cfg)
+	codec := remote.Codec().RTPCodecCapability
+	r, err := NewRTPReader(remote, codec, cfg)
+	if err != nil {
+		return nil, err
+	}
+	// pion/webrtc v5 fires OnTrack from signaling and learns the codec from the first
+	// packet, so it is resolved once that packet has been read.
+	if codec.MimeType == "" {
+		r.codecOf = func() webrtc.RTPCodecCapability { return remote.Codec().RTPCodecCapability }
+	}
+	return r, nil
 }
 
 // NewRTPReader returns a reader over any source of Opus RTP packets. codec says
@@ -101,24 +113,26 @@ func NewRTPReader(src RTPSource, codec webrtc.RTPCodecCapability, cfg ReaderConf
 	if maxConceal <= 0 {
 		maxConceal = DefaultMaxConceal
 	}
-	clockRate := codec.ClockRate
-	if clockRate == 0 {
-		clockRate = OpusClockRate
-	}
-
 	r := &TrackReader{
 		src:        src,
 		dec:        dec,
 		conceal:    !cfg.DisableConcealment,
 		maxConceal: max(1, int(maxConceal/dec.FrameDuration())),
-		clockRate:  clockRate,
+	}
+	r.setCodec(codec)
+	return r, nil
+}
+
+func (r *TrackReader) setCodec(codec webrtc.RTPCodecCapability) {
+	r.clockRate = codec.ClockRate
+	if r.clockRate == 0 {
+		r.clockRate = OpusClockRate
 	}
 	// A track negotiated as audio/red carries each packet plus copies of its
 	// predecessors, so it has to be unwrapped before the payload is Opus.
 	if isRED(codec.MimeType) {
 		r.red = red.NewDecoder()
 	}
-	return r, nil
 }
 
 func isRED(mimeType string) bool {
@@ -173,6 +187,10 @@ func (r *TrackReader) readPacket() error {
 	pkt, _, err := r.src.ReadRTP()
 	if err != nil {
 		return err
+	}
+	if r.codecOf != nil {
+		r.setCodec(r.codecOf())
+		r.codecOf = nil
 	}
 
 	packets := []*rtp.Packet{pkt}

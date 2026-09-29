@@ -20,7 +20,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/google/uuid"
 	"github.com/pion/rtcp"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/valyala/bytebufferpool"
 	"google.golang.org/protobuf/proto"
 

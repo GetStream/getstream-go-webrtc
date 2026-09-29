@@ -8,7 +8,7 @@ import (
 
 // pionModulePath is the module whose version is reported to the SFU as the
 // WebRTC implementation version.
-const pionModulePath = "github.com/pion/webrtc/v4"
+const pionModulePath = "github.com/pion/webrtc/v5"
 
 // sdkModulePath is this module.
 const sdkModulePath = "github.com/GetStream/getstream-go-webrtc"

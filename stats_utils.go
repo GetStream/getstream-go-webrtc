@@ -5,7 +5,7 @@ import (
 	"time"
 
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 )
 
 // SafeUint64ToUint32 saturates rather than wrapping, so a counter that has

@@ -13,10 +13,10 @@ import (
 	sfu_events "github.com/GetStream/protocol/protobuf/video/sfu/event"
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
 	"github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
-	"github.com/pion/ice/v4"
+	"github.com/pion/ice/v5"
 	"github.com/pion/interceptor"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v5"
+	"github.com/pion/webrtc/v5/pkg/media"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
@@ -347,8 +347,7 @@ func TestSubscriberNegotiation(t *testing.T) {
 
 	requireConnected(t, "subscriber", call.SubscriberPC().ConnectionState)
 
-	// pion surfaces a remote track on its first packet, so the SFU has to send
-	// media for OnTrack to fire.
+	// The SFU sends media so that the track's codec becomes known.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go writeSamplesUntilDone(ctx, videoTrack)
@@ -359,6 +358,10 @@ func TestSubscriberNegotiation(t *testing.T) {
 		require.Equal(t, SessionID("session-a"), track.ParticipantID.SessionID)
 		require.Equal(t, sfu_models.TrackType_TRACK_TYPE_VIDEO, track.TrackType)
 		require.NotNil(t, track.Participant)
+		// pion/webrtc v5 fires OnTrack from signaling and takes the codec from the
+		// first packet.
+		_, _, err := track.Track.ReadRTP()
+		require.NoError(t, err)
 		require.Equal(t, webrtc.MimeTypeVP8, track.Track.Codec().MimeType)
 	case <-time.After(iceTimeout):
 		t.Fatal("the subscribed track never reached the application")

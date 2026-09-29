@@ -14,8 +14,8 @@ import (
 
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v5"
+	"github.com/pion/webrtc/v5/pkg/media"
 
 	"github.com/GetStream/getstream-go-webrtc/track"
 )

@@ -10,14 +10,14 @@ require (
 	github.com/golang-jwt/jwt/v5 v5.3.0
 	github.com/google/uuid v1.6.0
 	github.com/oapi-codegen/runtime v1.6.0
-	github.com/pion/dtls/v4 v4.0.0-rc.1
-	github.com/pion/ice/v4 v4.4.4
+	github.com/pion/dtls/v4 v4.0.0-rc.2
+	github.com/pion/ice/v5 v5.0.0-rc.4
 	github.com/pion/interceptor v0.1.49
 	github.com/pion/logging v0.2.4
 	github.com/pion/rtcp v1.2.18
 	github.com/pion/rtp v1.10.5
 	github.com/pion/sdp/v3 v3.0.20
-	github.com/pion/webrtc/v4 v4.2.22
+	github.com/pion/webrtc/v5 v5.0.0-20260928213236-f3f54369bcce
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.12.1
 	github.com/thesyncim/gopus v0.1.1
@@ -47,11 +47,3 @@ require (
 	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 )
-
-replace github.com/pion/webrtc/v4 => github.com/GetStream/pion-webrtc/v4 v4.2.22-warp.3
-
-replace github.com/pion/ice/v4 => github.com/GetStream/pion-ice/v4 v4.4.4-warp.2
-
-replace github.com/pion/dtls/v4 => github.com/GetStream/pion-dtls/v4 v4.0.0-rc.1-warp.1
-
-replace github.com/pion/sctp => github.com/GetStream/pion-sctp v1.11.3-warp.1

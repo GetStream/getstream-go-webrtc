@@ -7,7 +7,7 @@ import (
 
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/getstream-go-webrtc/internal/red"

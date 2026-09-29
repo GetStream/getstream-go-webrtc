@@ -2,7 +2,7 @@ package track
 
 import (
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 )
 
 // NewAudioTrack creates an audio track, named after trackInfo, that starts

@@ -15,8 +15,8 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/rtp/codecs"
 	"github.com/pion/sdp/v3"
-	"github.com/pion/webrtc/v4"
-	"github.com/pion/webrtc/v4/pkg/media"
+	"github.com/pion/webrtc/v5"
+	"github.com/pion/webrtc/v5/pkg/media"
 	"google.golang.org/protobuf/proto"
 
 	"github.com/GetStream/getstream-go-webrtc/internal/red"

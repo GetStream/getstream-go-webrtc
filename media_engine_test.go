@@ -3,7 +3,7 @@ package rtc
 import (
 	"testing"
 
-	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/GetStream/getstream-go-webrtc/logger"
