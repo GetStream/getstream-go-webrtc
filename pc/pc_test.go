@@ -52,6 +52,7 @@ type signalingHandler struct {
 	onOffer                    func(webrtc.SessionDescription, uint32) error
 	onAnswer                   func(webrtc.SessionDescription, uint32) error
 	onICECandidateSender       func(*webrtc.ICECandidate, models.PeerType) error
+	onICECandidate             func(*webrtc.ICECandidate)
 	onNegotiationFailed        func(*NegotiationError)
 	onFailed                   func(ConnectionInfo)
 	onNeverConnected           func(ConnectionInfo)
@@ -117,10 +118,14 @@ func (h *signalingHandler) OnNegotiationStateChanged(state NegotiationState) {
 	}
 }
 
-func (h *signalingHandler) OnAddIceCandidate(*webrtc.ICECandidateInit)         {}
-func (h *signalingHandler) OnAddIceCandidateSuccess()                          {}
-func (h *signalingHandler) OnInitialConnected()                                {}
-func (h *signalingHandler) OnICECandidate(*webrtc.ICECandidate)                {}
+func (h *signalingHandler) OnAddIceCandidate(*webrtc.ICECandidateInit) {}
+func (h *signalingHandler) OnAddIceCandidateSuccess()                  {}
+func (h *signalingHandler) OnInitialConnected()                        {}
+func (h *signalingHandler) OnICECandidate(c *webrtc.ICECandidate) {
+	if h.onICECandidate != nil {
+		h.onICECandidate(c)
+	}
+}
 func (h *signalingHandler) OnICEGatheringStateChange(webrtc.ICEGatheringState) {}
 func (h *signalingHandler) OnNegotiationNeeded()                               {}
 func (h *signalingHandler) OnSetLocalDescription(webrtc.SessionDescription)    {}
