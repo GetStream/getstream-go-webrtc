@@ -48,9 +48,9 @@ require (
 	golang.org/x/time v0.14.0 // indirect
 )
 
-replace github.com/pion/webrtc/v4 => github.com/GetStream/pion-webrtc/v4 v4.2.22-warp.2
+replace github.com/pion/webrtc/v4 => github.com/GetStream/pion-webrtc/v4 v4.2.22-warp.3
 
-replace github.com/pion/ice/v4 => github.com/GetStream/pion-ice/v4 v4.4.4-warp.1
+replace github.com/pion/ice/v4 => github.com/GetStream/pion-ice/v4 v4.4.4-warp.2
 
 replace github.com/pion/dtls/v4 => github.com/GetStream/pion-dtls/v4 v4.0.0-rc.1-warp.1
 
