@@ -115,16 +115,6 @@ func WithPublisherPeerConfiguration(conf pc.PeerConfig) JoinOption {
 	}
 }
 
-// WithWARP sets PeerConfig.WARP on both peer connections, so they offer DTLS 1.3 and
-// DTLS in the ICE checks (SPED) to the SFU. Pass it after any peer configuration
-// option, which replaces the whole PeerConfig.
-func WithWARP() JoinOption {
-	return func(o *joinOptions) {
-		o.publisherPeerConfig.WARP = true
-		o.subscriberPeerConfig.WARP = true
-	}
-}
-
 // WithoutCreate joins only an existing call, failing if it does not exist.
 // Joining creates the call by default.
 func WithoutCreate() JoinOption {

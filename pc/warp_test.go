@@ -13,34 +13,34 @@ import (
 	"github.com/GetStream/protocol/protobuf/video/sfu/models"
 )
 
-// TestWARPNegotiatesWithAWARPSFU connects a publisher transport, which offers, to a pion
-// peer configured like a WARP SFU: DTLS 1.2 to 1.3, SPED, and the DTLS server role when
-// the offer has SPED. With WARP the connection uses DTLS 1.3 and SPED; without it nothing
-// changes.
-func TestWARPNegotiatesWithAWARPSFU(t *testing.T) {
+// TestWARPNegotiation connects a publisher transport, which offers, to a pion peer
+// configured like an SFU. A WARP SFU (DTLS 1.2 to 1.3, SPED, the DTLS server role when
+// the offer has SPED) gets DTLS 1.3 and SPED; an SFU without WARP gets DTLS 1.2 without
+// SPED, as before.
+func TestWARPNegotiation(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		warp        bool
 		wantVersion protocol.Version
 	}{
-		{name: "WARP", warp: true, wantVersion: protocol.Version1_3},
-		{name: "Legacy", warp: false, wantVersion: protocol.Version1_2},
+		{name: "WARPSFU", warp: true, wantVersion: protocol.Version1_3},
+		{name: "LegacySFU", warp: false, wantVersion: protocol.Version1_2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := newPCTestPeerConfig(t)
-			cfg.WARP = tc.warp
 			st := newPCTestWithTransportParams(t, TransportParams{
 				Transport:  models.PeerType_PEER_TYPE_PUBLISHER_UNSPECIFIED,
 				Logger:     logger.Noop{},
 				IsOfferer:  true,
-				PeerConfig: cfg,
+				PeerConfig: newPCTestPeerConfig(t),
 			})
 
 			sfu := newPCTestPeerConfig(t)
-			require.NoError(t, sfu.SettingEngine.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3))
-			sfu.SettingEngine.EnableSped(true)
-			sfu.SettingEngine.SetAnsweringDTLSRoleWithSPED(webrtc.DTLSRoleServer)
 			sfu.SettingEngine.SetLite(true)
+			if tc.warp {
+				require.NoError(t, sfu.SettingEngine.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3))
+				sfu.SettingEngine.EnableSped(true)
+				sfu.SettingEngine.SetAnsweringDTLSRoleWithSPED(webrtc.DTLSRoleServer)
+			}
 			remote := newRemotePeerWithConfig(t, st.tr, sfu)
 			st.handler.onICECandidateSender = remote.ICECandidateSender
 

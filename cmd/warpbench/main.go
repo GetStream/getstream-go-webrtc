@@ -1,12 +1,11 @@
-// Command warpbench measures how long getstream-go-webrtc takes to connect to an SFU,
-// with and without WARP, through the pronto-staging coordinator.
+// Command warpbench measures how long getstream-go-webrtc takes to connect to an SFU
+// through the pronto-staging coordinator. The SDK always offers WARP; the SFU decides.
 //
 // Each run joins a fresh call as two users: alice publishes audio (the publisher peer
 // connection, which the client offers) and bob subscribes to it (the subscriber peer
 // connection, which the SFU offers). Both joins can be pinned to one SFU.
 //
 //	go run ./cmd/warpbench -runs 10 -sfu sfu-gcp-us-east1-vp9-748282021185.stream-io-video.com
-//	go run ./cmd/warpbench -runs 10 -sfu <id> -warp
 package main
 
 import (
@@ -48,7 +47,6 @@ const (
 type options struct {
 	runs        int
 	sfu         string
-	warp        bool
 	environment string
 	location    string
 	out         string
@@ -70,7 +68,6 @@ type peerResult struct {
 
 type runResult struct {
 	Run        int        `json:"run"`
-	WARP       bool       `json:"warp"`
 	CallID     string     `json:"call_id"`
 	SFU        string     `json:"sfu"`
 	Publisher  peerResult `json:"publisher"`
@@ -82,7 +79,6 @@ func main() {
 	var o options
 	flag.IntVar(&o.runs, "runs", 10, "number of calls to measure")
 	flag.StringVar(&o.sfu, "sfu", "", "SFU id to pin both joins to (cascading=true&sfu_id=...)")
-	flag.BoolVar(&o.warp, "warp", false, "offer WARP (DTLS 1.3 and SPED) on both peer connections")
 	flag.StringVar(&o.environment, "environment", "pronto-staging", "pronto environment that issues the tokens")
 	flag.StringVar(&o.location, "location", "IAD", "location hint for the join (an airport code); -sfu overrides the choice")
 	flag.StringVar(&o.local, "local", "", "host:port of a local SFU (DeveloperMode) to use instead of the one the coordinator returns")
@@ -116,7 +112,7 @@ func main() {
 
 func measure(ctx context.Context, o options, run int) runResult {
 	callID := "warpbench-" + uuid.NewString()[:8]
-	r := runResult{Run: run, WARP: o.warp, CallID: callID}
+	r := runResult{Run: run, CallID: callID}
 
 	alice, err := join(ctx, o, callID, fmt.Sprintf("warpbench-%d-alice", run))
 	if err != nil {
@@ -234,9 +230,6 @@ func join(ctx context.Context, o options, callID, userID string) (*participant, 
 			}
 		}()
 	}))}
-	if o.warp {
-		opts = append(opts, rtc.WithWARP())
-	}
 	if p.joined, err = p.call.Join(ctx, opts...); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("join the SFU: %w", err)

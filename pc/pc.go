@@ -152,10 +152,6 @@ type PeerConfig struct {
 	SettingEngine webrtc.SettingEngine
 	Registry      *interceptor.Registry
 	*ICESettings
-	// WARP offers the connection setup optimizations of draft-uberti-tsvwg-warp
-	// that the SFU negotiates in band: DTLS 1.3, and DTLS in the ICE checks
-	// (SPED). Each falls back on its own when the SFU does not support it.
-	WARP bool
 }
 
 // ICESettings are the ICE knobs a client can usefully set.
@@ -224,12 +220,13 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	// for, and browsers never send one either.
 	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetICETimeouts(params.iceTimeouts())
-	if params.WARP {
-		if err := se.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3); err != nil {
-			return nil, xerr.Wrap(err)
-		}
-		se.EnableSped(true)
+	// Offer the WARP connection setup (draft-uberti-tsvwg-warp) that the SFU negotiates in
+	// band: DTLS 1.3, and DTLS in the ICE checks (SPED). An SFU without them answers as
+	// before, so the connection falls back to DTLS 1.2 after ICE.
+	if err := se.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3); err != nil {
+		return nil, xerr.Wrap(err)
 	}
+	se.EnableSped(true)
 
 	// One line per handshake message we send pins down which direction a
 	// stalled handshake lost.
