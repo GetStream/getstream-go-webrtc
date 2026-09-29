@@ -68,6 +68,12 @@ type Transport struct {
 	wake chan struct{}
 	stop chan struct{}
 
+	// Local candidates go to the SFU from their own goroutine, in gathering order. Each
+	// send is a round trip; on the event loop they would hold back the SFU's answer.
+	candidateMu    sync.Mutex
+	candidateQueue []*webrtc.ICECandidate
+	candidateWake  chan struct{}
+
 	mu             sync.Mutex
 	queue          []event
 	closed         bool
@@ -185,9 +191,11 @@ func NewPCTransport(params TransportParams) (*Transport, error) {
 		maxConnectTimeoutAfterICE: defaultMaxConnectTimeoutAfterICE,
 		wake:                      make(chan struct{}, 1),
 		stop:                      make(chan struct{}),
+		candidateWake:             make(chan struct{}, 1),
 	}
 	t.bindCallbacks()
 	go t.run()
+	go t.sendCandidates()
 	return t, nil
 }
 
@@ -290,8 +298,10 @@ func (t *Transport) bindCallbacks() {
 	})
 	t.PC.OnICECandidate(func(c *webrtc.ICECandidate) {
 		if c != nil {
+			// Queued through the event loop so that candidates still follow the offer.
 			t.enqueue("local ice candidate", func() error {
-				return h.OnICECandidateSender(c, t.Params.Transport)
+				t.queueCandidate(c)
+				return nil
 			})
 		}
 		h.OnICECandidate(c)
@@ -437,6 +447,41 @@ func (t *Transport) isClosed() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.closed
+}
+
+func (t *Transport) queueCandidate(c *webrtc.ICECandidate) {
+	t.candidateMu.Lock()
+	t.candidateQueue = append(t.candidateQueue, c)
+	t.candidateMu.Unlock()
+	select {
+	case t.candidateWake <- struct{}{}:
+	default:
+	}
+}
+
+// sendCandidates sends the queued local candidates one at a time, in order. A failed
+// send goes back through the event loop so it is handled like any failed event.
+func (t *Transport) sendCandidates() {
+	for {
+		select {
+		case <-t.stop:
+			return
+		case <-t.candidateWake:
+		}
+		for !t.isClosed() {
+			t.candidateMu.Lock()
+			if len(t.candidateQueue) == 0 {
+				t.candidateMu.Unlock()
+				break
+			}
+			c := t.candidateQueue[0]
+			t.candidateQueue = t.candidateQueue[1:]
+			t.candidateMu.Unlock()
+			if err := t.Params.Handler.OnICECandidateSender(c, t.Params.Transport); err != nil {
+				t.enqueue("local ice candidate", func() error { return err })
+			}
+		}
+	}
 }
 
 func (t *Transport) enqueue(name string, fn func() error) {
