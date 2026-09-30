@@ -31,6 +31,8 @@ type mediaSFU struct {
 	fake       *testutil.FakeSFU
 	pub, sub   *sfuWebRTCPeer
 	aliceAudio *webrtc.TrackLocalStaticSample
+	// holdAnswers, when set, holds every SendAnswer until it is closed.
+	holdAnswers atomic.Pointer[chan struct{}]
 }
 
 func newMediaSFU(t *testing.T, opts ...testutil.FakeSFUOption) *mediaSFU {
@@ -38,16 +40,37 @@ func newMediaSFU(t *testing.T, opts ...testutil.FakeSFUOption) *mediaSFU {
 
 	m := &mediaSFU{}
 	var pub, sub atomic.Pointer[sfuWebRTCPeer]
+	callState := &sfu_models.CallState{
+		Participants: []*sfu_models.Participant{
+			{UserId: "alice", SessionId: "session-a", TrackLookupPrefix: "prefix-a"},
+		},
+		ParticipantCount: &sfu_models.ParticipantCount{Total: 2},
+	}
 	opts = append([]testutil.FakeSFUOption{
-		testutil.WithJoinResponse(&sfu_events.JoinResponse{
-			CallState: &sfu_models.CallState{
-				Participants: []*sfu_models.Participant{
-					{UserId: "alice", SessionId: "session-a", TrackLookupPrefix: "prefix-a"},
-				},
-				ParticipantCount: &sfu_models.ParticipantCount{Total: 2},
-			},
-		}),
+		testutil.WithJoinResponse(&sfu_events.JoinResponse{CallState: callState}),
 		testutil.WithSignalRPC(testutil.SignalRPC{
+			// As the SFU's: the publisher answered, and the subscriber offered alice's
+			// audio, which a fast-joined participant is subscribed to.
+			FastJoin: func(_ context.Context, req *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+				resp := &signal_rpc.FastJoinResponse{
+					CallState:               callState,
+					SubscriberNegotiationId: 1,
+					ServerTimings:           []*signal_rpc.ServerTiming{{Name: "total", DurationMs: 2}},
+				}
+				if req.GetPublisherSdp() != "" {
+					answer, err := pub.Load().Answer(req.GetPublisherSdp())
+					if err != nil {
+						return nil, err
+					}
+					resp.PublisherSdp = answer
+				}
+				offer, err := sub.Load().Offer()
+				if err != nil {
+					return nil, err
+				}
+				resp.SubscriberSdp = offer
+				return resp, nil
+			},
 			SetPublisher: func(_ context.Context, req *signal_rpc.SetPublisherRequest) (*signal_rpc.SetPublisherResponse, error) {
 				answer, err := pub.Load().Answer(req.GetSdp())
 				if err != nil {
@@ -55,7 +78,14 @@ func newMediaSFU(t *testing.T, opts ...testutil.FakeSFUOption) *mediaSFU {
 				}
 				return &signal_rpc.SetPublisherResponse{Sdp: answer}, nil
 			},
-			SendAnswer: func(_ context.Context, req *signal_rpc.SendAnswerRequest) (*signal_rpc.SendAnswerResponse, error) {
+			SendAnswer: func(ctx context.Context, req *signal_rpc.SendAnswerRequest) (*signal_rpc.SendAnswerResponse, error) {
+				if hold := m.holdAnswers.Load(); hold != nil {
+					select {
+					case <-*hold:
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}
 				if err := sub.Load().AcceptAnswer(req.GetSdp()); err != nil {
 					return nil, err
 				}
@@ -297,7 +327,7 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 		call.onceConnect.Do(func() {})
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		_, err := call.Join(ctx)
+		_, err := call.Join(ctx, WithJoinFlow(JoinFlowLegacy))
 		require.NoError(t, err)
 		trace := call.JoinTrace()
 		require.NoError(t, call.Leave("test over"))

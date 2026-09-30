@@ -23,6 +23,10 @@ type joinTracer struct {
 	timer   *time.Timer
 	handler func(jointrace.Trace)
 
+	// fast is set when the first join takes the fast path, whose steps depend on each
+	// other differently.
+	fast bool
+
 	// Moments the spans are built from that are not spans of their own.
 	pubSignalSent time.Time
 	subOfferAt    time.Time
@@ -60,6 +64,18 @@ func (j *joinTracer) markJoined() {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.joined = true
+}
+
+func (j *joinTracer) setFast(fast bool) {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	j.fast = fast
+}
+
+func (j *joinTracer) isFast() bool {
+	j.mu.Lock()
+	defer j.mu.Unlock()
+	return j.fast
 }
 
 func (j *joinTracer) snapshot() jointrace.Trace {
@@ -118,6 +134,10 @@ func (c *Call) peerSpans(publisher bool, t pc.Timing) {
 	if rec == nil {
 		return
 	}
+	if c.trace.isFast() {
+		fastPeerSpans(rec, publisher, t)
+		return
+	}
 	if publisher {
 		rec.Add(jointrace.Span{
 			Name: jointrace.PubDebounce, After: []string{jointrace.SFUJoin},
@@ -154,6 +174,49 @@ func (c *Call) peerSpans(publisher bool, t pc.Timing) {
 		Name: jointrace.SubDTLS, After: []string{jointrace.SubICE},
 		Start: t.ICEConnected, End: t.DTLSConnected,
 		Kind: jointrace.KindNet, Peer: jointrace.PeerUDP,
+	})
+}
+
+// fastPeerSpans is peerSpans for a fast join. The offer and answer went with the
+// FastJoin, but the SFU's candidates still come on the websocket, so ICE waits for both.
+func fastPeerSpans(rec *jointrace.Recorder, publisher bool, t pc.Timing) {
+	candidates, signalled := jointrace.SubSFUCandidates, jointrace.SubAnswer
+	ice, dtls := jointrace.SubICE, jointrace.SubDTLS
+	if publisher {
+		candidates, signalled = jointrace.PubSFUCandidates, jointrace.SFUFastJoin
+		ice, dtls = jointrace.PubICE, jointrace.PubDTLS
+	}
+	if attached, ok := rec.Get(jointrace.SFUWS); ok {
+		rec.Add(jointrace.Span{
+			Name: candidates, After: []string{jointrace.SFUWS},
+			Start: attached.End, End: t.FirstRemoteCandidate,
+			Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+			Note: "trickled on the websocket once it attaches",
+		})
+	}
+	rec.Add(jointrace.Span{
+		Name: ice, After: []string{signalled, candidates},
+		Start: t.ICEChecking, End: t.ICEConnected,
+		Kind: jointrace.KindNet, Peer: jointrace.PeerUDP,
+	})
+	rec.Add(jointrace.Span{
+		Name: dtls, After: []string{ice},
+		Start: t.ICEConnected, End: t.DTLSConnected,
+		Kind: jointrace.KindNet, Peer: jointrace.PeerUDP,
+	})
+}
+
+// subscriberAnswered records the client's side of the fast join's subscriber offer:
+// from the FastJoin response that carried it to the answer being ready to send.
+func (c *Call) subscriberAnswered(at time.Time) {
+	rec := c.trace.recorder()
+	c.trace.mu.Lock()
+	offerAt := c.trace.subOfferAt
+	c.trace.mu.Unlock()
+	rec.Add(jointrace.Span{
+		Name: jointrace.SubAnswer, After: []string{jointrace.SFUFastJoin},
+		Start: offerAt, End: at, Kind: jointrace.KindLocal, Peer: jointrace.PeerLocal,
+		Note: "sent without waiting",
 	})
 }
 

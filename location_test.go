@@ -64,7 +64,7 @@ func TestJoinSendsLocationAuto(t *testing.T) {
 			call.onceConnect.Do(func() {})
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			_, err = call.Join(ctx, tc.opts...)
+			_, err = call.Join(ctx, append(tc.opts, WithJoinFlow(JoinFlowLegacy))...)
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = call.Leave("test over") })
 

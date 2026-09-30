@@ -44,9 +44,9 @@ The module builds with `CGO_ENABLED=0`.
 | Path | What it is |
 | --- | --- |
 | `.` (`rtc`) | `Client`, `Call`, publisher, subscriber, media engine, stats, event fan-out. `call.go` is the most important file. |
-| `coordinator/` | Coordinator REST + event websocket. Exactly one endpoint is called: `POST /api/v2/video/call/{type}/{id}/join`. |
+| `coordinator/` | Coordinator REST + event websocket. Joins call `POST /api/v2/video/call/{type}/{id}/fast_join` (candidate SFUs, `fastjoin.go`), or `.../join` on the legacy flow, for reconnects and migrations, and where `fast_join` is missing. |
 | `coordinator/models/` | Generated from the public OpenAPI spec. Do not hand-edit. |
-| `signal/` | The SFU signalling client: the protobuf websocket plus the twirp `SignalServer` RPCs. |
+| `signal/` | The SFU signalling client: the protobuf websocket plus the twirp `SignalServer` and `FastJoinServer` RPCs. |
 | `pc/` | `pc.Transport`, the peer-connection wrapper. |
 | `track/` | Local tracks driven by a `SampleProvider`, simulcast layers, RED transcoding for audio. |
 | `audio/` | `audio.PCM`, resampling, chunking, WAV, G.711. |

@@ -741,6 +741,20 @@ func (c *Client) connectWithRetries(
 	_type, id string,
 	joinCallRequest models.JoinCallRequest,
 ) (*models.JoinCallResponse, error) {
+	return retryJoin(ctx, c, joinCallRequest, func(ctx context.Context) (models.JoinCallResponse, error) {
+		return c.CoordinatorClientInterface.JoinCall(ctx, _type, id, joinCallRequest)
+	})
+}
+
+// retryJoin runs a coordinator join until it succeeds, retrying what IsRetryableError
+// allows with a backoff. A first-ever join of a user the coordinator does not know yet
+// waits once for the websocket, which is what creates the user.
+func retryJoin[T any](
+	ctx context.Context,
+	c *Client,
+	joinCallRequest models.JoinCallRequest,
+	join func(context.Context) (T, error),
+) (*T, error) {
 	backoff := 100 * time.Millisecond
 	var lastError error
 	waitedForUser := false
@@ -756,7 +770,7 @@ func (c *Client) connectWithRetries(
 		}
 
 		c.Tracing.Load().Emit(rtcstats.CoordinatorJoinCallEvent, joinCallRequest)
-		result, err := c.CoordinatorClientInterface.JoinCall(ctx, _type, id, joinCallRequest)
+		result, err := join(ctx)
 		if err == nil {
 			c.Tracing.Load().Emit(rtcstats.CoordinatorJoinCallResponseEvent, result)
 			return &result, nil
@@ -856,9 +870,20 @@ func (c *Client) joinCoordinator(
 	c.shareRTTs(rec)
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectedEvent, result)
 
-	getCred := func(forceReload bool, excludeSFUID string) (models.Credentials, error) {
+	return result, c.legacyCredentials(ctx, callType, id, joinCallRequest, result.Credentials), nil
+}
+
+// legacyCredentials is the GetCredentialsFunc of a joined call: first the credentials the
+// join handed out, then, for a reconnect or a migration, a fresh coordinator join.
+func (c *Client) legacyCredentials(
+	ctx context.Context,
+	callType, id string,
+	joinCallRequest models.JoinCallRequest,
+	first models.Credentials,
+) GetCredentialsFunc {
+	return func(forceReload bool, excludeSFUID string) (models.Credentials, error) {
 		if !forceReload && excludeSFUID == "" {
-			return result.Credentials, nil
+			return first, nil
 		}
 		req := joinCallRequest
 		if excludeSFUID != "" {
@@ -874,8 +899,40 @@ func (c *Client) joinCoordinator(
 		c.Tracing.Load().Emit(rtcstats.CoordinatorConnectedEvent, retryResult)
 		return retryResult.Credentials, nil
 	}
+}
 
-	return result, getCred, nil
+// fastJoinCoordinator is joinCoordinator for the fast join: it POSTs to fast_join and
+// returns the candidate SFUs instead of credentials for one.
+func (c *Client) fastJoinCoordinator(
+	ctx context.Context,
+	callType, id string,
+	joinCallRequest models.JoinCallRequest,
+	rec *jointrace.Recorder,
+) (*models.FastJoinCallResponse, error) {
+	if joinCallRequest.Location == "" {
+		joinCallRequest.Location = LocationAuto
+	}
+
+	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectEvent, joinCallRequest)
+	start := time.Now()
+	joinCtx := jointrace.WithStep(ctx, rec, jointrace.CoordFastJoin, jointrace.PeerCoordinator)
+	result, err := retryJoin(joinCtx, c, joinCallRequest, func(ctx context.Context) (models.FastJoinCallResponse, error) {
+		return c.CoordinatorClientInterface.FastJoinCall(ctx, callType, id, joinCallRequest)
+	})
+	if err != nil {
+		return nil, err
+	}
+	note := ""
+	if jointrace.Reused(joinCtx) {
+		note = "reused connection"
+	}
+	rec.Add(jointrace.Span{
+		Name:  jointrace.CoordFastJoin,
+		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
+	})
+	c.shareRTTs(rec)
+	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectedEvent, result)
+	return result, nil
 }
 
 func (c *Client) StatsReportingInterval() time.Duration {
