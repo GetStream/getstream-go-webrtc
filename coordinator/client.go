@@ -117,8 +117,9 @@ type CoordinatorClientInterface interface {
 		_type string,
 		id string,
 		joinCallRequest models.JoinCallRequest,
-		connectionID *string,
 	) (models.JoinCallResponse, error)
+
+	WatchCall(ctx context.Context, _type, id, connectionID string) error
 
 	Connect(
 		ctx context.Context,
@@ -198,17 +199,17 @@ func NewClient(apiKey, userID string, tokenProvider TokenProvider, handler Handl
 	return c, nil
 }
 
-// JoinCall joins a call and returns the SFU credentials for it. This is the
-// only coordinator endpoint the SDK calls.
+// JoinCall joins a call and returns the SFU credentials for it. It carries no
+// websocket connection id, so it never waits for the websocket: WatchCall
+// subscribes the connection to the call's events once it is up.
 func (c *Client) JoinCall(
 	ctx context.Context,
 	_type string,
 	id string,
 	joinCallRequest models.JoinCallRequest,
-	connectionID *string,
 ) (models.JoinCallResponse, error) {
 	var response models.JoinCallResponse
-	query := map[string]any{"connection_id": connectionID}
+	query := map[string]any{}
 	for k := range c.joinQuery {
 		query[k] = c.joinQuery.Get(k)
 	}
@@ -219,6 +220,20 @@ func (c *Client) JoinCall(
 		},
 		query, joinCallRequest, &response)
 	return response, xerr.Wrapf(err, "join call %s:%s", _type, id)
+}
+
+// WatchCall subscribes the websocket connection connectionID to the call's
+// events. The coordinator's GetCall does that for a client-side request that
+// carries a connection_id; the call state it returns is discarded.
+func (c *Client) WatchCall(ctx context.Context, _type, id, connectionID string) error {
+	var response json.RawMessage
+	err := c.makeRequest(ctx, http.MethodGet, "/api/v2/video/call/{type}/{id}",
+		map[string]any{
+			"type": _type,
+			"id":   id,
+		},
+		map[string]any{"connection_id": connectionID, "members_limit": 0}, nil, &response)
+	return xerr.Wrapf(err, "watch call %s:%s", _type, id)
 }
 
 func (c *Client) Close() error {

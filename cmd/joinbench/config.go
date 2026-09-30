@@ -50,9 +50,6 @@ type config struct {
 	CallType string
 	Debug    bool
 	DAG      bool
-	// Watch sends the join with the websocket's connection id, so the coordinator
-	// subscribes the websocket to the call's events, as every SDK join does.
-	Watch bool
 
 	BaseURL   string
 	WSURL     string
@@ -83,8 +80,6 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.StringVar(&c.CallType, "call-type", "default", "call type")
 	fs.BoolVar(&c.Debug, "debug", false, "log the SDK at debug level to stderr")
 	fs.BoolVar(&c.DAG, "dag", false, "draw every measured join's DAG")
-	fs.BoolVar(&c.Watch, "watch", true, "send the websocket's connection_id with the join; false works around a local "+
-		"coordinator that stamps a stale host IP into connection ids (joins then wait on a 10 s dial)")
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}

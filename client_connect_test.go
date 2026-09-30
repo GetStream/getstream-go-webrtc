@@ -40,7 +40,7 @@ func TestConnectWithRetries(t *testing.T) {
 		t.Parallel()
 
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				return models.JoinCallResponse{
 					Call: models.CallResponse{ID: "test-call"},
 				}, nil
@@ -67,7 +67,7 @@ func TestConnectWithRetries(t *testing.T) {
 
 		callCount := 0
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				callCount++
 				if callCount < 3 {
 					return models.JoinCallResponse{}, retryableErr
@@ -97,7 +97,7 @@ func TestConnectWithRetries(t *testing.T) {
 		nonRetryableErr := coordinator.NewError(int(sfu_models.ErrorCode_ERROR_CODE_PERMISSION_DENIED), "Non-retryable error", false)
 
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				return models.JoinCallResponse{}, nonRetryableErr
 			},
 			GetInterceptorFunc: newInterceptorStore,
@@ -125,7 +125,7 @@ func TestConnectWithRetries(t *testing.T) {
 		callCount := 0
 
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				callCount++
 
 				// The first call blocks until the context is cancelled.
@@ -220,7 +220,7 @@ func TestConnectWithRetries(t *testing.T) {
 		networkErr := errors.New("dial tcp 127.0.0.1:443: connect: connection refused")
 
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				return models.JoinCallResponse{}, networkErr
 			},
 			GetInterceptorFunc: newInterceptorStore,
@@ -247,7 +247,7 @@ func TestConnectWithRetries(t *testing.T) {
 		nonRetryableErr := coordinator.NewError(int(sfu_models.ErrorCode_ERROR_CODE_PERMISSION_DENIED), "permission denied", false)
 
 		mockClient := &mocks.CoordinatorClientInterfaceMock{
-			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+			JoinCallFunc: func(ctx context.Context, _type, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 				return models.JoinCallResponse{}, nonRetryableErr
 			},
 			GetInterceptorFunc: newInterceptorStore,

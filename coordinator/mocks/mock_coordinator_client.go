@@ -30,8 +30,11 @@ var _ coordinator.CoordinatorClientInterface = &CoordinatorClientInterfaceMock{}
 //			GetInterceptorFunc: func() *event.Store[models.WebsocketEvent] {
 //				panic("mock out the GetInterceptor method")
 //			},
-//			JoinCallFunc: func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+//			JoinCallFunc: func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 //				panic("mock out the JoinCall method")
+//			},
+//			WatchCallFunc: func(ctx context.Context, _type string, id string, connectionID string) error {
+//				panic("mock out the WatchCall method")
 //			},
 //		}
 //
@@ -50,7 +53,10 @@ type CoordinatorClientInterfaceMock struct {
 	GetInterceptorFunc func() *event.Store[models.WebsocketEvent]
 
 	// JoinCallFunc mocks the JoinCall method.
-	JoinCallFunc func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error)
+	JoinCallFunc func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error)
+
+	// WatchCallFunc mocks the WatchCall method.
+	WatchCallFunc func(ctx context.Context, _type string, id string, connectionID string) error
 
 	// calls tracks calls to the methods.
 	calls struct {
@@ -77,14 +83,24 @@ type CoordinatorClientInterfaceMock struct {
 			ID string
 			// JoinCallRequest is the joinCallRequest argument value.
 			JoinCallRequest models.JoinCallRequest
+		}
+		// WatchCall holds details about calls to the WatchCall method.
+		WatchCall []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// _type is the _type argument value.
+			_type string
+			// ID is the id argument value.
+			ID string
 			// ConnectionID is the connectionID argument value.
-			ConnectionID *string
+			ConnectionID string
 		}
 	}
 	lockClose          sync.RWMutex
 	lockConnect        sync.RWMutex
 	lockGetInterceptor sync.RWMutex
 	lockJoinCall       sync.RWMutex
+	lockWatchCall      sync.RWMutex
 }
 
 // Close calls CloseFunc.
@@ -178,7 +194,7 @@ func (mock *CoordinatorClientInterfaceMock) GetInterceptorCalls() []struct {
 }
 
 // JoinCall calls JoinCallFunc.
-func (mock *CoordinatorClientInterfaceMock) JoinCall(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest, connectionID *string) (models.JoinCallResponse, error) {
+func (mock *CoordinatorClientInterfaceMock) JoinCall(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.JoinCallResponse, error) {
 	if mock.JoinCallFunc == nil {
 		panic("CoordinatorClientInterfaceMock.JoinCallFunc: method is nil but CoordinatorClientInterface.JoinCall was just called")
 	}
@@ -187,18 +203,16 @@ func (mock *CoordinatorClientInterfaceMock) JoinCall(ctx context.Context, _type 
 		_type           string
 		ID              string
 		JoinCallRequest models.JoinCallRequest
-		ConnectionID    *string
 	}{
 		Ctx:             ctx,
 		_type:           _type,
 		ID:              id,
 		JoinCallRequest: joinCallRequest,
-		ConnectionID:    connectionID,
 	}
 	mock.lockJoinCall.Lock()
 	mock.calls.JoinCall = append(mock.calls.JoinCall, callInfo)
 	mock.lockJoinCall.Unlock()
-	return mock.JoinCallFunc(ctx, _type, id, joinCallRequest, connectionID)
+	return mock.JoinCallFunc(ctx, _type, id, joinCallRequest)
 }
 
 // JoinCallCalls gets all the calls that were made to JoinCall.
@@ -210,17 +224,59 @@ func (mock *CoordinatorClientInterfaceMock) JoinCallCalls() []struct {
 	_type           string
 	ID              string
 	JoinCallRequest models.JoinCallRequest
-	ConnectionID    *string
 } {
 	var calls []struct {
 		Ctx             context.Context
 		_type           string
 		ID              string
 		JoinCallRequest models.JoinCallRequest
-		ConnectionID    *string
 	}
 	mock.lockJoinCall.RLock()
 	calls = mock.calls.JoinCall
 	mock.lockJoinCall.RUnlock()
+	return calls
+}
+
+// WatchCall calls WatchCallFunc.
+func (mock *CoordinatorClientInterfaceMock) WatchCall(ctx context.Context, _type string, id string, connectionID string) error {
+	if mock.WatchCallFunc == nil {
+		panic("CoordinatorClientInterfaceMock.WatchCallFunc: method is nil but CoordinatorClientInterface.WatchCall was just called")
+	}
+	callInfo := struct {
+		Ctx          context.Context
+		_type        string
+		ID           string
+		ConnectionID string
+	}{
+		Ctx:          ctx,
+		_type:        _type,
+		ID:           id,
+		ConnectionID: connectionID,
+	}
+	mock.lockWatchCall.Lock()
+	mock.calls.WatchCall = append(mock.calls.WatchCall, callInfo)
+	mock.lockWatchCall.Unlock()
+	return mock.WatchCallFunc(ctx, _type, id, connectionID)
+}
+
+// WatchCallCalls gets all the calls that were made to WatchCall.
+// Check the length with:
+//
+//	len(mockedCoordinatorClientInterface.WatchCallCalls())
+func (mock *CoordinatorClientInterfaceMock) WatchCallCalls() []struct {
+	Ctx          context.Context
+	_type        string
+	ID           string
+	ConnectionID string
+} {
+	var calls []struct {
+		Ctx          context.Context
+		_type        string
+		ID           string
+		ConnectionID string
+	}
+	mock.lockWatchCall.RLock()
+	calls = mock.calls.WatchCall
+	mock.lockWatchCall.RUnlock()
 	return calls
 }

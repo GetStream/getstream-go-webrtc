@@ -28,7 +28,6 @@ func TestParseConfigDefaultsToTheLocalStack(t *testing.T) {
 	require.InDelta(t, 3.5, c.Budget, 0)
 	require.Equal(t, localBaseURL, c.BaseURL)
 	require.Equal(t, localWSURL, c.WSURL)
-	require.True(t, c.Watch)
 }
 
 func TestParseConfigReadsTheFlags(t *testing.T) {
