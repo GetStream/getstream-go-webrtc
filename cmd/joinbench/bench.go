@@ -90,9 +90,15 @@ type joined struct {
 	received atomic.Int64
 }
 
-func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID string) (*joined, error) {
+// join joins user to the call, publishing audio if asked: with the join on the fast
+// flow, which is what it is for, and right after it on the legacy one.
+func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID string, publish bool) (*joined, error) {
 	j := &joined{user: user, call: client.Call(b.cfg.CallType, callID)}
-	opts := []rtc.JoinOption{rtc.WithOnTrack(rtc.SubscriberFunc(func(remote rtc.OnTrackReceived) {
+	flow := rtc.JoinFlowLegacy
+	if b.cfg.Flow == flowFast {
+		flow = rtc.JoinFlowFast
+	}
+	opts := []rtc.JoinOption{rtc.WithJoinFlow(flow), rtc.WithOnTrack(rtc.SubscriberFunc(func(remote rtc.OnTrackReceived) {
 		// The first-packet stamp is taken on read: keep reading.
 		go func() {
 			for {
@@ -106,13 +112,34 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 	if b.cfg.Location != "" {
 		opts = append(opts, rtc.WithLocation(b.cfg.Location))
 	}
+	var info *sfu_models.TrackInfo
+	var audio webrtc.TrackLocal
+	if publish {
+		var err error
+		if info, audio, err = silentAudio(); err != nil {
+			return nil, err
+		}
+		if flow == rtc.JoinFlowFast {
+			opts = append(opts, rtc.WithTrack(info, audio))
+		}
+	}
 	var err error
 	if j.resp, err = j.call.Join(ctx, opts...); err != nil {
 		return nil, fmt.Errorf("%s join: %w", user, err)
 	}
+	if got := j.call.JoinFlow(); got != flow {
+		_ = j.call.Leave("joinbench: wrong flow")
+		return nil, fmt.Errorf("%s: asked for the %s flow, the join took %s", user, flow, got)
+	}
 	if b.cfg.SFU != "" && !samePin(b.cfg.SFU, j.sfu()) {
 		_ = j.call.Leave("joinbench: wrong SFU")
 		return nil, fmt.Errorf("%s: asked for SFU %s, the coordinator returned %s", user, b.cfg.SFU, j.sfu())
+	}
+	if publish && flow == rtc.JoinFlowLegacy {
+		if _, err := j.call.AddTrack(info, audio); err != nil {
+			_ = j.call.Leave("joinbench: publish failed")
+			return nil, fmt.Errorf("%s publish: %w", j.user, err)
+		}
 	}
 	return j, nil
 }
@@ -148,17 +175,14 @@ func (*silence) NextSample(ctx context.Context) (media.Sample, error) {
 
 func (*silence) CurrentAudioLevel() uint8 { return 127 }
 
-func (j *joined) publishAudio() error {
+func silentAudio() (*sfu_models.TrackInfo, webrtc.TrackLocal, error) {
 	info := &sfu_models.TrackInfo{TrackId: uuid.NewString(), TrackType: sfu_models.TrackType_TRACK_TYPE_AUDIO}
 	audio, err := track.NewAudioTrack(info, &silence{},
 		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2})
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	if _, err := j.call.AddTrack(info, audio); err != nil {
-		return fmt.Errorf("%s publish: %w", j.user, err)
-	}
-	return nil
+	return info, audio, nil
 }
 
 // subscribeTo subscribes to user's audio, as an app does with the call state from the
@@ -233,15 +257,12 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 			return err
 		}
 	}
-	alice, err := b.join(ctx, cl.alice, aliceID, r.CallID)
+	alice, err := b.join(ctx, cl.alice, aliceID, r.CallID, true)
 	if err != nil {
 		return err
 	}
 	defer alice.leave()
 	r.SFU = alice.sfu()
-	if err := alice.publishAudio(); err != nil {
-		return err
-	}
 	aliceTrace, err := alice.await(ctx, jointrace.PubRTP)
 	if scenario == scenarioPubSub {
 		r.addTrace(rolePublisher, aliceID, aliceTrace)
@@ -256,7 +277,7 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 			return err
 		}
 	}
-	bob, err := b.join(ctx, cl.bob, bobID, r.CallID)
+	bob, err := b.join(ctx, cl.bob, bobID, r.CallID, scenario == scenarioOneToOne)
 	if err != nil {
 		return err
 	}
@@ -266,9 +287,6 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 	}
 	steps := []string{jointrace.SubRTP}
 	if scenario == scenarioOneToOne {
-		if err := bob.publishAudio(); err != nil {
-			return err
-		}
 		steps = append(steps, jointrace.PubRTP)
 	}
 	if err := bob.subscribeTo(ctx, aliceID); err != nil {
