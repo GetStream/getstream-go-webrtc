@@ -104,6 +104,21 @@ if _, err := call.AddTrack(track.TrackInfo(), track); err != nil {
 return writer.Write(audio.FromInt16(samples, 24000, 1))
 ```
 
+## Join latency
+
+A call records how its first join went: every network step, timer and local step, what it
+waited for, and each step in round trips to its peer. `String()` draws it as a DAG with
+the critical path marked; it marshals to JSON.
+
+```go
+call.OnJoinTrace(func(trace jointrace.Trace) {
+	log.Print(trace) // or json.Marshal(trace)
+})
+```
+
+It fires once media flows both ways, or after `rtc.JoinTraceTimeout`. `call.JoinTrace()`
+returns what has been recorded so far.
+
 ## Examples
 
 ```bash

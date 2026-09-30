@@ -28,8 +28,10 @@ import (
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/event"
 	"github.com/GetStream/getstream-go-webrtc/internal/atomicx"
+	"github.com/GetStream/getstream-go-webrtc/internal/netdelay"
 	"github.com/GetStream/getstream-go-webrtc/internal/ratelimit"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/pc"
 	"github.com/GetStream/getstream-go-webrtc/rtcstats"
@@ -274,6 +276,8 @@ type Call struct {
 
 	joinOptions      []JoinOption
 	coordinatorState atomic.Pointer[CallState]
+	// trace records the first join's steps; see JoinTrace.
+	trace joinTracer
 
 	GetCred GetCredentialsFunc
 	cred    atomic.Pointer[models.Credentials]
@@ -382,6 +386,7 @@ func newCall(cc *Client, callType, callID string) *Call {
 	}
 	c.runReconnect = c.reconnect
 	c.fastReconnectViable = c.canFastReconnect
+	c.trace.udpRTT = c.selectedPairRTT
 	c.callCtx, c.callCancel = context.WithCancel(context.Background())
 	c.connState.Store(CallConnectionStateConnecting)
 	c.nextReconnectStrategy = sfu_models.WebsocketReconnectStrategy_WEBSOCKET_RECONNECT_STRATEGY_REJOIN
@@ -400,7 +405,7 @@ func (c *Call) joinCoordinator(ctx context.Context, options joinOptions) error {
 		return nil
 	}
 
-	result, getCred, err := c.cc.joinCoordinator(ctx, c.Type, c.Id, options.coordinatorRequest())
+	result, getCred, err := c.cc.joinCoordinator(ctx, c.Type, c.Id, options.coordinatorRequest(), c.trace.recorder())
 	if err != nil {
 		return xerr.Wrap(err)
 	}
@@ -804,6 +809,11 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 	for _, o := range opts {
 		o(&options)
 	}
+	reconnecting := options.reconnectDetails.GetStrategy() != sfu_models.WebsocketReconnectStrategy_WEBSOCKET_RECONNECT_STRATEGY_UNSPECIFIED
+	rec := c.trace.begin(time.Now(), reconnecting)
+	if !reconnecting {
+		c.cc.claimConnectTrace(rec)
+	}
 
 	if err := c.joinCoordinator(ctx, options); err != nil {
 		return nil, err
@@ -879,12 +889,18 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 		c.Client().Tracing.Store(c.Tracing.Load())
 	}
 
+	pcsStart := time.Now()
 	if err := c.initPubAndSub(options); err != nil {
 		return nil, xerr.Wrap(err)
 	}
+	rec.Add(jointrace.Span{
+		Name: jointrace.PCsCreate, After: afterFirst(rec, jointrace.CoordJoin),
+		Start: pcsStart, End: time.Now(), Kind: jointrace.KindLocal, Peer: jointrace.PeerLocal,
+	})
 
 	var resp *sfu_events.JoinResponse
-	resp, err = c.Client().Connect(ctx, req)
+	dialStart := time.Now()
+	resp, err = c.Client().Connect(jointrace.WithStep(ctx, rec, jointrace.SFUWSDial, jointrace.PeerSFU), req)
 	if err != nil {
 		// If ReconnectStrategy is still not specified here, it means the first join failed and we did not start the retry mechanism.
 		// We need to start it now, in the other case, we just need to return the error
@@ -894,6 +910,19 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 		if err != nil {
 			return nil, xerr.Wrap(err)
 		}
+	}
+	joinedAt := time.Now()
+	dialedAt := c.Client().DialedAt()
+	rec.Add(jointrace.Span{
+		Name: jointrace.SFUWSDial, After: afterFirst(rec, jointrace.PCsCreate),
+		Start: dialStart, End: dialedAt, Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+	})
+	rec.Add(jointrace.Span{
+		Name: jointrace.SFUJoin, After: []string{jointrace.SFUWSDial},
+		Start: dialedAt, End: joinedAt, Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+	})
+	if !reconnecting {
+		c.trace.markJoined()
 	}
 	c.store.Store(NewParticipantStore(c, resp.CallState))
 	c.applyJoinResponse(resp)
@@ -989,6 +1018,16 @@ func (c *Call) initPubAndSub(options joinOptions) error {
 	c.sentSubscriptions = nil
 	c.subscribedTracksMu.Unlock()
 
+	if c.cc.networkDelay > 0 {
+		for _, conf := range []*pc.PeerConfig{&options.subscriberPeerConfig, &options.publisherPeerConfig} {
+			delayed, err := netdelay.NewNet(c.cc.networkDelay)
+			if err != nil {
+				return xerr.Wrap(err)
+			}
+			conf.SettingEngine.SetNet(delayed)
+		}
+	}
+
 	sub, err := newSubscriber(c, options.subscriber, options.subscriberPeerConfig, options.beforeSubscriberSendAnswer)
 	if err != nil {
 		return xerr.Wrap(err)
@@ -1044,6 +1083,9 @@ func (c *Call) signalOptions() []signal.Option {
 	}
 	if c.statsEnabled() {
 		opts = append(opts, signal.WithTracing())
+	}
+	if c.cc.networkDelay > 0 {
+		opts = append(opts, signal.WithDialContext(netdelay.Dialer(c.cc.networkDelay, nil)))
 	}
 	return opts
 }
@@ -1121,7 +1163,7 @@ func (c *Call) RefreshState(ctx context.Context) error {
 		return xerr.Error("call has not been joined")
 	}
 
-	result, _, err := c.cc.joinCoordinator(ctx, c.Type, c.Id, *state.JoinCallRequest)
+	result, _, err := c.cc.joinCoordinator(ctx, c.Type, c.Id, *state.JoinCallRequest, nil)
 	if err != nil {
 		return xerr.Wrap(err)
 	}
@@ -1148,6 +1190,7 @@ func (c *Call) RawHandler(event *sfu_events.SfuEvent) {
 // REJOIN or a Leave performs, and this runs on the signalling read loop, so a
 // panic here would take the process down with it.
 func (c *Call) OnSubscriberOffer(offer *sfu_events.SfuEvent_SubscriberOffer) {
+	c.subscriberOffer(time.Now())
 	sub := c.subscriberPeer()
 	if sub == nil {
 		c.logger.Warn("dropping subscriber offer: no subscriber peer connection")
@@ -1258,13 +1301,20 @@ func (c *Call) SubscribeToTracks(ctx context.Context, trackDetails ...*signal_rp
 // Callers that have to reach the SFU regardless -- a reconnect restoring state
 // onto a session that knows nothing about it -- go through here.
 func (c *Call) sendSubscriptions(ctx context.Context, trackDetails []*signal_rpc.TrackSubscriptionDetails) error {
-	resp, err := c.Client().UpdateSubscriptions(ctx, &signal_rpc.UpdateSubscriptionsRequest{
-		SessionId: c.SessionID.Load(),
-		Tracks:    trackDetails,
-	})
+	rec := c.trace.recorder()
+	start := time.Now()
+	resp, err := c.Client().UpdateSubscriptions(jointrace.WithStep(ctx, rec, jointrace.SubSubscribe, jointrace.PeerSFU),
+		&signal_rpc.UpdateSubscriptionsRequest{
+			SessionId: c.SessionID.Load(),
+			Tracks:    trackDetails,
+		})
 	if err != nil {
 		return xerr.Wrap(err)
 	}
+	rec.Add(jointrace.Span{
+		Name: jointrace.SubSubscribe, After: []string{jointrace.SFUJoin},
+		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+	})
 
 	if err := resp.GetError(); err != nil {
 		return xerr.Wrap(fmt.Errorf("SubscribeToTracks error: %s", err.String()))

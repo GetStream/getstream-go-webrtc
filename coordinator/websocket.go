@@ -9,9 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/gobwas/ws"
-
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
+	"github.com/GetStream/getstream-go-webrtc/internal/wsdial"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
 	"github.com/GetStream/getstream-go-webrtc/websocket"
 )
@@ -108,7 +107,7 @@ func (wsc *wsclient) Connect(ctx context.Context, joinRequest *models.WSAuthMess
 		return nil, xerr.Error("ws client is nil")
 	}
 
-	wsConn, _, _, err := ws.DefaultDialer.Dial(ctx, wsc.url)
+	wsConn, err := wsdial.Dial(ctx, wsc.url, wsc.c.dial, nil)
 	if err != nil {
 		return nil, xerr.Wrapf(err, "dial %s", wsc.url)
 	}

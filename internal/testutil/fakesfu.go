@@ -2,6 +2,8 @@ package testutil
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,6 +59,7 @@ type FakeSFU struct {
 
 	connected chan struct{}
 	once      sync.Once
+	tls       bool
 }
 
 // FakeSFUOption configures a FakeSFU. Options are applied before the server
@@ -77,6 +80,13 @@ func WithJoinResponse(resp *sfu_events.JoinResponse) FakeSFUOption {
 func WithJoinHandler(handler func(*sfu_events.JoinRequest) *sfu_events.SfuEvent) FakeSFUOption {
 	return func(f *FakeSFU) {
 		f.onJoinRequest = handler
+	}
+}
+
+// WithTLS serves the websocket and the RPCs over TLS, with a certificate TLSConfig trusts.
+func WithTLS() FakeSFUOption {
+	return func(f *FakeSFU) {
+		f.tls = true
 	}
 }
 
@@ -125,13 +135,27 @@ func NewFakeSFU(opts ...FakeSFUOption) *FakeSFU {
 	mux.HandleFunc(wsPath, f.serve)
 	mux.Handle("/", f.recordAuthorization(sfu_signal_rpc.NewSignalServerServer(
 		&signalRPCService{f: f}, twirp.WithServerPathPrefix(""))))
-	f.srv = httptest.NewServer(mux)
+	f.srv = httptest.NewUnstartedServer(mux)
+	if f.tls {
+		f.srv.StartTLS()
+	} else {
+		f.srv.Start()
+	}
 	return f
+}
+
+// TLSConfig trusts the certificate of a fake started WithTLS.
+func (f *FakeSFU) TLSConfig() *tls.Config {
+	pool := x509.NewCertPool()
+	if cert := f.srv.Certificate(); cert != nil {
+		pool.AddCert(cert)
+	}
+	return &tls.Config{RootCAs: pool}
 }
 
 const wsPath = "/ws"
 
-// WsEndpoint is the ws:// URL a signal client dials.
+// WsEndpoint is the ws:// (wss:// WithTLS) URL a signal client dials.
 func (f *FakeSFU) WsEndpoint() string {
 	return "ws" + strings.TrimPrefix(f.srv.URL, "http") + wsPath
 }

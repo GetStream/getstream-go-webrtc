@@ -16,6 +16,7 @@ import (
 	"github.com/GetStream/getstream-go-webrtc/audio"
 	"github.com/GetStream/getstream-go-webrtc/audio/opus"
 	audiortc "github.com/GetStream/getstream-go-webrtc/audio/rtc"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 )
 
 var stt struct{ Send func([]byte) }
@@ -87,4 +88,10 @@ func sendAudio(call *rtc.Call, samples []int16) error {
 		return err
 	}
 	return writer.Write(audio.FromInt16(samples, 24000, 1))
+}
+
+func joinLatency(call *rtc.Call) {
+	call.OnJoinTrace(func(trace jointrace.Trace) {
+		log.Print(trace) // or json.Marshal(trace)
+	})
 }
