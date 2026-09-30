@@ -114,8 +114,7 @@ func (f *fakeCoordinator) client(t *testing.T) *Client {
 		WithCoordinatorOptions(
 			coordinator.ApiURL(f.srv.URL),
 			coordinator.WithWsURL("ws"+strings.TrimPrefix(f.srv.URL, "http")+"/api/v2/connect"),
-		),
-		WithoutLocationDiscovery())
+		))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client

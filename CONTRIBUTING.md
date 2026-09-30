@@ -43,7 +43,7 @@ The module builds with `CGO_ENABLED=0`.
 
 | Path | What it is |
 | --- | --- |
-| `.` (`rtc`) | `Client`, `Call`, publisher, subscriber, media engine, location discovery, stats, event fan-out. `call.go` is the most important file. |
+| `.` (`rtc`) | `Client`, `Call`, publisher, subscriber, media engine, stats, event fan-out. `call.go` is the most important file. |
 | `coordinator/` | Coordinator REST + event websocket. Exactly one endpoint is called: `POST /api/v2/video/call/{type}/{id}/join`. |
 | `coordinator/models/` | Generated from the public OpenAPI spec. Do not hand-edit. |
 | `signal/` | The SFU signalling client: the protobuf websocket plus the twirp `SignalServer` RPCs. |

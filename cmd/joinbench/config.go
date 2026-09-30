@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	rtc "github.com/GetStream/getstream-go-webrtc"
 )
 
 // The local stack's coordinator, used when the environment names none.
@@ -73,7 +75,7 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.IntVar(&c.Runs, "runs", 10, "measured runs per mode and scenario")
 	fs.StringVar(&c.SFU, "sfu", "", "SFU id to pin every join to (sfu_id)")
 	fs.StringVar(&c.PinTag, "pin-tag", "", "SFU tag to pin every join to (pin_to_tag)")
-	fs.StringVar(&c.Location, "location", "", "location sent to the coordinator: an airport code or auto; empty lets the SDK discover it (the CloudFront hint)")
+	fs.StringVar(&c.Location, "location", rtc.LocationAuto, "location sent to the coordinator: auto (GeoIP on the client address) or an airport code")
 	fs.Float64Var(&c.Budget, "budget", 3.5, "warm time to media budget in round trips, for PASS/FAIL")
 	fs.StringVar(&c.Out, "out", "", "append one JSON line per run to this file")
 	fs.DurationVar(&c.Timeout, "timeout", 60*time.Second, "time limit of one run")

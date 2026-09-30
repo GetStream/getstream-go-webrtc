@@ -8,9 +8,8 @@
 // publishes and subscribes, and both of his times are measured: the agent case.
 //
 // cold builds new Clients for every run: new coordinator websocket, new HTTP
-// transports, location and token not cached. warm keeps one Client per user across
-// the runs, after one discarded call, so later joins reuse its connections, location
-// and token.
+// transports, token not cached. warm keeps one Client per user across the runs,
+// after one discarded call, so later joins reuse its connections and token.
 //
 //	eval "$(~/src/video-sfu/.factory/3rtt/tools/local-stack.sh env)"
 //	go run ./cmd/joinbench -env local -mode cold,warm -rtt 100ms -runs 10 -out local.jsonl

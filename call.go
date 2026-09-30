@@ -155,8 +155,13 @@ func WithMembersLimit(limit int32) JoinOption {
 	}
 }
 
-// WithLocation pins the join to a location hint (an airport code such as
-// "AMS"), skipping discovery.
+// LocationAuto is the location a join sends by default: the coordinator picks the
+// SFU nearest the address the request comes from (GeoIP).
+const LocationAuto = "auto"
+
+// WithLocation tells the coordinator where the client is, as an airport code
+// such as "AMS", instead of LocationAuto. It is for servers that know their
+// region, and for clients behind a proxy far from them.
 func WithLocation(location string) JoinOption {
 	return func(o *joinOptions) {
 		o.location = location
