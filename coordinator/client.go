@@ -119,6 +119,13 @@ type CoordinatorClientInterface interface {
 		joinCallRequest models.JoinCallRequest,
 	) (models.JoinCallResponse, error)
 
+	FastJoinCall(
+		ctx context.Context,
+		_type string,
+		id string,
+		joinCallRequest models.JoinCallRequest,
+	) (models.FastJoinCallResponse, error)
+
 	WatchCall(ctx context.Context, _type, id, connectionID string) error
 
 	Connect(
@@ -209,17 +216,41 @@ func (c *Client) JoinCall(
 	joinCallRequest models.JoinCallRequest,
 ) (models.JoinCallResponse, error) {
 	var response models.JoinCallResponse
-	query := map[string]any{}
-	for k := range c.joinQuery {
-		query[k] = c.joinQuery.Get(k)
-	}
 	err := c.makeRequest(ctx, http.MethodPost, "/api/v2/video/call/{type}/{id}/join",
 		map[string]any{
 			"type": _type,
 			"id":   id,
 		},
-		query, joinCallRequest, &response)
+		c.joinQueryParams(), joinCallRequest, &response)
 	return response, xerr.Wrapf(err, "join call %s:%s", _type, id)
+}
+
+// FastJoinCall is JoinCall for the fast join: instead of credentials for one SFU the
+// coordinator has already set the call up on, it returns candidate SFUs, each with a
+// setup grant that lets it create the call itself. A coordinator without the endpoint
+// answers 404, which IsNotFound reports.
+func (c *Client) FastJoinCall(
+	ctx context.Context,
+	_type string,
+	id string,
+	joinCallRequest models.JoinCallRequest,
+) (models.FastJoinCallResponse, error) {
+	var response models.FastJoinCallResponse
+	err := c.makeRequest(ctx, http.MethodPost, "/api/v2/video/call/{type}/{id}/fast_join",
+		map[string]any{
+			"type": _type,
+			"id":   id,
+		},
+		c.joinQueryParams(), joinCallRequest, &response)
+	return response, xerr.Wrapf(err, "fast join call %s:%s", _type, id)
+}
+
+func (c *Client) joinQueryParams() map[string]any {
+	query := map[string]any{}
+	for k := range c.joinQuery {
+		query[k] = c.joinQuery.Get(k)
+	}
+	return query
 }
 
 // WatchCall subscribes the websocket connection connectionID to the call's
@@ -310,10 +341,14 @@ func statusError(status int, body []byte) *Error {
 	retry := status == http.StatusTooManyRequests || status/100 == 5
 
 	var reported models.APIError
+	var e *Error
 	if err := json.Unmarshal(body, &reported); err == nil && reported.Message != "" {
-		return NewError(int(reported.Code), reported.Message, retry)
+		e = NewError(int(reported.Code), reported.Message, retry)
+	} else {
+		e = NewError(0, fmt.Sprintf("unexpected status code %d: %s", status, body), retry)
 	}
-	return NewError(0, fmt.Sprintf("unexpected status code %d: %s", status, body), retry)
+	e.Status = status
+	return e
 }
 
 // RawHandler forwards an event to the interceptors without going through the

@@ -123,6 +123,78 @@ func TestJoinCallRequestPath(t *testing.T) {
 	}}, resp.Credentials.IceServers)
 }
 
+// TestFastJoinCallRequestPath is TestJoinCallRequestPath for fast_join, which answers
+// with candidate SFUs, each with its own token, ICE servers and grant, in order.
+func TestFastJoinCallRequestPath(t *testing.T) {
+	t.Parallel()
+
+	var path, auth string
+	var query url.Values
+	var body models.JoinCallRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, auth, query = r.URL.Path, r.Header.Get("authorization"), r.URL.Query()
+		raw, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(raw, &body))
+		w.Header().Set("Content-Type", "application/json")
+		_, err = io.WriteString(w, `{
+			"call": {"id": "the-call", "type": "default", "cid": "default:the-call"},
+			"duration": "1ms",
+			"candidates": [
+				{
+					"server": {"url": "https://sfu-1.example.com/twirp", "ws_endpoint": "wss://sfu-1.example.com/ws", "edge_name": "sfu-1"},
+					"token": "sfu-1-token",
+					"ice_servers": [{"urls": ["turn:turn-1.example.com:3478"], "username": "u1", "password": "p1"}],
+					"setup_grant": "grant-1"
+				},
+				{
+					"server": {"url": "https://sfu-2.example.com/twirp", "ws_endpoint": "wss://sfu-2.example.com/ws", "edge_name": "sfu-2"},
+					"token": "sfu-2-token",
+					"setup_grant": "grant-2"
+				}
+			]
+		}`)
+		require.NoError(t, err)
+	}))
+	defer srv.Close()
+
+	client := newTestClient(t, coordinator.ApiURL(srv.URL),
+		coordinator.WithJoinQuery(map[string][]string{"sfu_id": {"sfu-2"}}))
+	resp, err := client.FastJoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{Location: "auto"})
+	require.NoError(t, err)
+
+	require.Equal(t, "/api/v2/video/call/default/the-call/fast_join", path)
+	require.Equal(t, "jwt-token", auth)
+	require.Equal(t, "sfu-2", query.Get("sfu_id"), "pinned like join")
+	require.NotContains(t, query, "connection_id")
+	require.Equal(t, "auto", body.Location)
+
+	require.Equal(t, "the-call", resp.Call.ID)
+	require.Len(t, resp.Candidates, 2)
+	first := resp.Candidates[0].Credentials()
+	require.Equal(t, "https://sfu-1.example.com/twirp", first.Server.URL)
+	require.Equal(t, "wss://sfu-1.example.com/ws", first.Server.WsEndpoint)
+	require.Equal(t, "sfu-1-token", first.Token)
+	require.Equal(t, []string{"turn:turn-1.example.com:3478"}, first.IceServers[0].Urls)
+	require.Equal(t, "grant-1", resp.Candidates[0].SetupGrant)
+	require.Equal(t, "sfu-2-token", resp.Candidates[1].Token)
+}
+
+// A coordinator without fast_join answers it with a plain 404: the join goes the
+// legacy way, which an unknown user's 404 must not be mistaken for.
+func TestFastJoinCallNotFound(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+
+	client := newTestClient(t, coordinator.ApiURL(srv.URL))
+	_, err := client.FastJoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{})
+	require.Error(t, err)
+	require.True(t, coordinator.IsNotFound(err))
+	require.False(t, coordinator.IsUnknownUser(err))
+}
+
 func TestJoinCallCarriesTheJoinQuery(t *testing.T) {
 	t.Parallel()
 

@@ -27,6 +27,9 @@ var _ coordinator.CoordinatorClientInterface = &CoordinatorClientInterfaceMock{}
 //			ConnectFunc: func(ctx context.Context, joinRequest *models.WSAuthMessage) (*models.ConnectedEvent, error) {
 //				panic("mock out the Connect method")
 //			},
+//			FastJoinCallFunc: func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error) {
+//				panic("mock out the FastJoinCall method")
+//			},
 //			GetInterceptorFunc: func() *event.Store[models.WebsocketEvent] {
 //				panic("mock out the GetInterceptor method")
 //			},
@@ -49,6 +52,9 @@ type CoordinatorClientInterfaceMock struct {
 	// ConnectFunc mocks the Connect method.
 	ConnectFunc func(ctx context.Context, joinRequest *models.WSAuthMessage) (*models.ConnectedEvent, error)
 
+	// FastJoinCallFunc mocks the FastJoinCall method.
+	FastJoinCallFunc func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error)
+
 	// GetInterceptorFunc mocks the GetInterceptor method.
 	GetInterceptorFunc func() *event.Store[models.WebsocketEvent]
 
@@ -69,6 +75,17 @@ type CoordinatorClientInterfaceMock struct {
 			Ctx context.Context
 			// JoinRequest is the joinRequest argument value.
 			JoinRequest *models.WSAuthMessage
+		}
+		// FastJoinCall holds details about calls to the FastJoinCall method.
+		FastJoinCall []struct {
+			// Ctx is the ctx argument value.
+			Ctx context.Context
+			// _type is the _type argument value.
+			_type string
+			// ID is the id argument value.
+			ID string
+			// JoinCallRequest is the joinCallRequest argument value.
+			JoinCallRequest models.JoinCallRequest
 		}
 		// GetInterceptor holds details about calls to the GetInterceptor method.
 		GetInterceptor []struct {
@@ -98,6 +115,7 @@ type CoordinatorClientInterfaceMock struct {
 	}
 	lockClose          sync.RWMutex
 	lockConnect        sync.RWMutex
+	lockFastJoinCall   sync.RWMutex
 	lockGetInterceptor sync.RWMutex
 	lockJoinCall       sync.RWMutex
 	lockWatchCall      sync.RWMutex
@@ -163,6 +181,50 @@ func (mock *CoordinatorClientInterfaceMock) ConnectCalls() []struct {
 	mock.lockConnect.RLock()
 	calls = mock.calls.Connect
 	mock.lockConnect.RUnlock()
+	return calls
+}
+
+// FastJoinCall calls FastJoinCallFunc.
+func (mock *CoordinatorClientInterfaceMock) FastJoinCall(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error) {
+	if mock.FastJoinCallFunc == nil {
+		panic("CoordinatorClientInterfaceMock.FastJoinCallFunc: method is nil but CoordinatorClientInterface.FastJoinCall was just called")
+	}
+	callInfo := struct {
+		Ctx             context.Context
+		_type           string
+		ID              string
+		JoinCallRequest models.JoinCallRequest
+	}{
+		Ctx:             ctx,
+		_type:           _type,
+		ID:              id,
+		JoinCallRequest: joinCallRequest,
+	}
+	mock.lockFastJoinCall.Lock()
+	mock.calls.FastJoinCall = append(mock.calls.FastJoinCall, callInfo)
+	mock.lockFastJoinCall.Unlock()
+	return mock.FastJoinCallFunc(ctx, _type, id, joinCallRequest)
+}
+
+// FastJoinCallCalls gets all the calls that were made to FastJoinCall.
+// Check the length with:
+//
+//	len(mockedCoordinatorClientInterface.FastJoinCallCalls())
+func (mock *CoordinatorClientInterfaceMock) FastJoinCallCalls() []struct {
+	Ctx             context.Context
+	_type           string
+	ID              string
+	JoinCallRequest models.JoinCallRequest
+} {
+	var calls []struct {
+		Ctx             context.Context
+		_type           string
+		ID              string
+		JoinCallRequest models.JoinCallRequest
+	}
+	mock.lockFastJoinCall.RLock()
+	calls = mock.calls.FastJoinCall
+	mock.lockFastJoinCall.RUnlock()
 	return calls
 }
 
