@@ -83,7 +83,12 @@ type Transport struct {
 	// dtlsConnectedAt is when the DTLS handshake finished for the first time.
 	dtlsConnectedAt time.Time
 	connectedAt     time.Time
-	lastPCState     webrtc.PeerConnectionState
+	// negotiationRequestedAt, offerStartedAt and firstRemoteCandidateAt are the first
+	// Negotiate call, the first offer being created and the first trickled candidate.
+	negotiationRequestedAt time.Time
+	offerStartedAt         time.Time
+	firstRemoteCandidateAt time.Time
+	lastPCState            webrtc.PeerConnectionState
 	// lastICEState and lastDTLSState skip the Closed transition that Close
 	// causes, so a snapshot taken afterwards still shows where the connection
 	// stalled.
@@ -135,6 +140,12 @@ type TransportParams struct {
 // step it has not reached. ICE restarts do not move these: they describe how the
 // transport came up in the first place.
 type Timing struct {
+	// NegotiationRequested is the first Negotiate call; OfferStarted is when the first
+	// offer began to be created, after the debounce.
+	NegotiationRequested time.Time
+	OfferStarted         time.Time
+	// FirstRemoteCandidate is when the first candidate trickled by the SFU arrived.
+	FirstRemoteCandidate time.Time
 	// ICEChecking is when ICE started checking candidate pairs.
 	ICEChecking time.Time
 	// ICEConnected is when ICE found a working pair.
@@ -349,6 +360,9 @@ func (t *Transport) Negotiate(force bool) {
 	if t.closed {
 		return
 	}
+	if t.negotiationRequestedAt.IsZero() {
+		t.negotiationRequestedAt = time.Now()
+	}
 	if force {
 		stopTimer(&t.negotiateTimer)
 		t.enqueueLocked("send offer", t.sendOffer)
@@ -404,6 +418,15 @@ func (t *Transport) HandleRemoteDescriptionWithNegotiationID(sd webrtc.SessionDe
 
 // AddICECandidate adds a candidate trickled by the SFU.
 func (t *Transport) AddICECandidate(candidate webrtc.ICECandidateInit) {
+	t.mu.Lock()
+	first := t.firstRemoteCandidateAt.IsZero()
+	if first {
+		t.firstRemoteCandidateAt = time.Now()
+	}
+	t.mu.Unlock()
+	if first {
+		t.notifyTiming()
+	}
 	t.enqueue("remote ice candidate", func() error {
 		t.addRemoteCandidate(candidate)
 		return nil
@@ -552,6 +575,11 @@ func (t *Transport) offer(iceRestart bool) error {
 		iceRestart = true
 	}
 
+	t.mu.Lock()
+	if t.offerStartedAt.IsZero() {
+		t.offerStartedAt = time.Now()
+	}
+	t.mu.Unlock()
 	offer, err := t.PC.CreateOffer(&webrtc.OfferOptions{ICERestart: iceRestart})
 	if err != nil {
 		return xerr.Wrapf(err, "create offer failed")
@@ -882,11 +910,28 @@ func (t *Transport) Timing() Timing {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return Timing{
-		ICEChecking:   t.iceStartedAt,
-		ICEConnected:  t.iceConnectedAt,
-		DTLSConnected: t.dtlsConnectedAt,
-		Connected:     t.connectedAt,
+		NegotiationRequested: t.negotiationRequestedAt,
+		OfferStarted:         t.offerStartedAt,
+		FirstRemoteCandidate: t.firstRemoteCandidateAt,
+		ICEChecking:          t.iceStartedAt,
+		ICEConnected:         t.iceConnectedAt,
+		DTLSConnected:        t.dtlsConnectedAt,
+		Connected:            t.connectedAt,
 	}
+}
+
+// SelectedPairRTT is the round-trip time ICE measured on the selected candidate pair, or
+// zero before it has one.
+func (t *Transport) SelectedPairRTT() time.Duration {
+	dtls := dtlsTransportOf(t.PC)
+	if dtls == nil || dtls.ICETransport() == nil {
+		return 0
+	}
+	stats, ok := dtls.ICETransport().GetSelectedCandidatePairStats()
+	if !ok || stats.CurrentRoundTripTime <= 0 {
+		return 0
+	}
+	return time.Duration(stats.CurrentRoundTripTime * float64(time.Second))
 }
 
 // notifyTiming hands the current timing to OnTimingChange, if one is set.

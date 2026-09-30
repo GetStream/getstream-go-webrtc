@@ -21,6 +21,7 @@ import (
 
 	sdkinterceptor "github.com/GetStream/getstream-go-webrtc/interceptor"
 	"github.com/GetStream/getstream-go-webrtc/internal/nack"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/pc"
 	"github.com/GetStream/getstream-go-webrtc/rtcstats"
@@ -96,7 +97,11 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 	// discover RTX SSRC mappings via header extensions (mid, rsid)
 	peerConfig.Registry.Add(sdkinterceptor.NewRTXProberFactory())
 	peerConfig.Registry.Add(sdkinterceptor.NewFirstPacketFactory(func(at time.Time) {
-		c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.FirstRTP, at) })
+		var dtls time.Time
+		if pub.Transport != nil {
+			dtls = pub.Timing().DTLSConnected
+		}
+		c.firstRTP(true, dtls, at)
 	}, nil))
 
 	cred := c.cred.Load()
@@ -113,14 +118,12 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 	pub.Tracing.Load().Emit(rtcstats.PeerCreateEvent, peerConfig.Config)
 
 	peerc, err := pc.NewPCTransport(pc.TransportParams{
-		Logger:     pub.logger,
-		PeerConfig: peerConfig,
-		Handler:    pub,
-		IsOfferer:  true,
-		Transport:  sfu_models.PeerType_PEER_TYPE_PUBLISHER_UNSPECIFIED,
-		OnTimingChange: func(timing pc.Timing) {
-			c.timing.update(func(t *ConnectionTiming) { stampTransport(&t.Publisher, timing) })
-		},
+		Logger:         pub.logger,
+		PeerConfig:     peerConfig,
+		Handler:        pub,
+		IsOfferer:      true,
+		Transport:      sfu_models.PeerType_PEER_TYPE_PUBLISHER_UNSPECIFIED,
+		OnTimingChange: func(timing pc.Timing) { c.peerSpans(true, timing) },
 	})
 
 	pub.Transport = peerc
@@ -217,6 +220,7 @@ func (p *publisher) OnICECandidateSender(c *webrtc.ICECandidate, target sfu_mode
 	if err != nil {
 		return xerr.Wrap(err)
 	}
+	start := time.Now()
 	_, err = p.c.Client().IceTrickle(ctx, &sfu_models.ICETrickle{
 		PeerType:     p.Params.Transport,
 		IceCandidate: string(b),
@@ -225,6 +229,11 @@ func (p *publisher) OnICECandidateSender(c *webrtc.ICECandidate, target sfu_mode
 	if err != nil {
 		return xerr.Wrap(err)
 	}
+	p.c.trace.recorder().Extend(jointrace.Span{
+		Name: jointrace.PubTrickleOut, After: []string{jointrace.PubOffer},
+		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+		Note: "not needed by the ICE-lite SFU",
+	})
 	return nil
 }
 
@@ -268,7 +277,11 @@ func (p *publisher) OnTrack(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 }
 
 func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) error {
-	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.Offer, time.Now()) })
+	rec := p.c.trace.recorder()
+	rec.Add(jointrace.Span{
+		Name: jointrace.PubOffer, After: []string{jointrace.PubDebounce},
+		Start: p.Timing().OfferStarted, End: time.Now(), Kind: jointrace.KindLocal, Peer: jointrace.PeerLocal,
+	})
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
@@ -284,12 +297,22 @@ func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) 
 		SessionId: p.c.SessionID.Load(),
 		Tracks:    tracks,
 	}
-	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.SignalSent, time.Now()) })
-	resp, err := p.c.Client().SetPublisher(ctx, req)
+	sent := time.Now()
+	p.c.trace.mu.Lock()
+	if p.c.trace.pubSignalSent.IsZero() {
+		p.c.trace.pubSignalSent = sent
+	}
+	p.c.trace.mu.Unlock()
+	resp, err := p.c.Client().SetPublisher(jointrace.WithStep(ctx, rec, jointrace.PubSetPublisher, jointrace.PeerSFU), req)
 	if err != nil {
 		return err
 	}
-	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.SignalDone, time.Now()) })
+	rec.Add(jointrace.Span{
+		Name: jointrace.PubSetPublisher, After: []string{jointrace.PubOffer},
+		Start: sent, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+	})
+	// A candidate may have arrived while the RPC was in flight.
+	p.c.peerSpans(true, p.Timing())
 	if sfuErr := resp.GetError(); sfuErr != nil {
 		// Return a NegotiationError with SFU error details (code, message)
 		return pc.NewNegotiationError("SetPublisher failed", nil, sfuErr)

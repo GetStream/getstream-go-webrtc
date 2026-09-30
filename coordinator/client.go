@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"reflect"
@@ -21,6 +22,7 @@ import (
 	"github.com/GetStream/getstream-go-webrtc/event"
 	"github.com/GetStream/getstream-go-webrtc/internal/rtretry"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 )
 
@@ -43,6 +45,7 @@ type options struct {
 	versionHeader string
 	logger        logger.ILogger
 	enableWs      bool
+	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 }
 
 var defaultOptions = options{
@@ -78,6 +81,14 @@ func ApiURL(apiURL string) Option {
 func WithWsURL(wsURL string) Option {
 	return func(o *options) {
 		o.wsURL = wsURL
+	}
+}
+
+// WithDialContext opens the REST and websocket connections through dial instead of a
+// plain net.Dialer.
+func WithDialContext(dial func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	return func(o *options) {
+		o.dial = dial
 	}
 }
 
@@ -164,9 +175,15 @@ func NewClient(apiKey, userID string, tokenProvider TokenProvider, handler Handl
 		c.wsclient = newWsClient(u.String(), c)
 	}
 
+	var transport http.RoundTripper = http.DefaultTransport
+	if o.dial != nil {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.DialContext = o.dial
+		transport = tr
+	}
 	c.httpClient = &http.Client{
 		Timeout:   5 * time.Second,
-		Transport: rtretry.NewRoundTripperRetryer(http.DefaultTransport),
+		Transport: rtretry.NewRoundTripperRetryer(transport),
 	}
 	return c, nil
 }
@@ -243,6 +260,7 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, pathParam
 		return xerr.Wrapf(err, "%s %s", method, path)
 	}
 	defer resp.Body.Close()
+	jointrace.ServerTiming(ctx, resp.Header.Get("Server-Timing"))
 
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(resp.Body)

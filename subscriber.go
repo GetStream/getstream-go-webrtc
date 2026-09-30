@@ -20,6 +20,7 @@ import (
 	"github.com/valyala/bytebufferpool"
 
 	sdkinterceptor "github.com/GetStream/getstream-go-webrtc/interceptor"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/pc"
 	"github.com/GetStream/getstream-go-webrtc/rtcstats"
@@ -125,20 +126,22 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 	}
 
 	peerConfig.Registry.Add(sdkinterceptor.NewFirstPacketFactory(nil, func(at time.Time) {
-		c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.FirstRTP, at) })
+		var dtls time.Time
+		if sub.Transport != nil {
+			dtls = sub.Timing().DTLSConnected
+		}
+		c.firstRTP(false, dtls, at)
 	}))
 
 	sub.Tracing.Load().Emit(rtcstats.PeerCreateEvent, peerConfig.Config)
 
 	peerc, err := pc.NewPCTransport(pc.TransportParams{
-		Logger:     sub.logger,
-		PeerConfig: peerConfig,
-		Handler:    sub,
-		IsOfferer:  false,
-		Transport:  sfu_models.PeerType_PEER_TYPE_SUBSCRIBER,
-		OnTimingChange: func(timing pc.Timing) {
-			c.timing.update(func(t *ConnectionTiming) { stampTransport(&t.Subscriber, timing) })
-		},
+		Logger:         sub.logger,
+		PeerConfig:     peerConfig,
+		Handler:        sub,
+		IsOfferer:      false,
+		Transport:      sfu_models.PeerType_PEER_TYPE_SUBSCRIBER,
+		OnTimingChange: func(timing pc.Timing) { c.peerSpans(false, timing) },
 	})
 	sub.c = c
 	sub.Transport = peerc
@@ -283,12 +286,22 @@ func (s *subscriber) OnAnswer(sd webrtc.SessionDescription, negotiationId uint32
 			return xerr.Wrap(err)
 		}
 	}
-	s.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.SignalSent, time.Now()) })
-	answer, err := s.c.Client().SendAnswer(context.Background(), req)
+	rec := s.c.trace.recorder()
+	answer, err := s.c.Client().SendAnswer(
+		jointrace.WithStep(context.Background(), rec, jointrace.SubSendAnswer, jointrace.PeerSFU), req)
 	if err != nil {
 		return xerr.Wrap(err)
 	}
-	s.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.SignalDone, time.Now()) })
+	s.c.trace.mu.Lock()
+	offerAt := s.c.trace.subOfferAt
+	s.c.trace.mu.Unlock()
+	rec.Add(jointrace.Span{
+		Name: jointrace.SubSendAnswer, After: []string{jointrace.SubOffer},
+		Start: offerAt, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+		Note: "includes creating the answer",
+	})
+	// ICE may have finished while the RPC was in flight.
+	s.c.peerSpans(false, s.Timing())
 	if err := answer.GetError(); err != nil {
 		return errors.New(err.Message)
 	}

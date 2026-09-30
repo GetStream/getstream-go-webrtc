@@ -2,18 +2,20 @@ package signal
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
 
+	"github.com/GetStream/getstream-go-webrtc/internal/wsdial"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
 	sfu_events "github.com/GetStream/protocol/protobuf/video/sfu/event"
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
 	sfu_signal_rpc "github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
-	"github.com/gobwas/ws"
 	"github.com/twitchtv/twirp"
 
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
@@ -49,6 +51,26 @@ type options struct {
 	healthCheckInterval time.Duration
 	healthCheckTimeout  time.Duration
 	readTimeout         time.Duration
+
+	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
+	tlsConfig *tls.Config
+	transport http.RoundTripper
+}
+
+// WithTLSConfig sets the TLS configuration of the websocket and the RPC connections, so a
+// test can trust its own certificate.
+func WithTLSConfig(cfg *tls.Config) Option {
+	return func(o *options) {
+		o.tlsConfig = cfg
+	}
+}
+
+// WithDialContext opens the websocket and the RPC connections through dial instead of a
+// plain net.Dialer.
+func WithDialContext(dial func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
+	return func(o *options) {
+		o.dial = dial
+	}
 }
 
 func WithLogger(l logger.ILogger) Option {
@@ -196,6 +218,15 @@ func NewClient(cred models.Credentials, handler Handler, opts ...Option) *Client
 	if o.logger == nil {
 		o.logger = logger.Noop{}
 	}
+	o.transport = http.DefaultTransport
+	if o.dial != nil || o.tlsConfig != nil {
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		if o.dial != nil {
+			tr.DialContext = o.dial
+		}
+		tr.TLSClientConfig = o.tlsConfig
+		o.transport = tr
+	}
 	client := &Client{
 		options: o,
 		signalEventStore: event.NewStore(func(e *sfu_events.SfuEvent) any {
@@ -220,7 +251,7 @@ func (c *Client) getSignalRPCClient(cred models.Credentials) sfu_signal_rpc.Sign
 		cred.Server.URL,
 		&http.Client{
 			Timeout:   5 * time.Second,
-			Transport: rtretry.NewRoundTripperRetryer(http.DefaultTransport),
+			Transport: rtretry.NewRoundTripperRetryer(c.transport),
 		},
 		twirp.WithClientPathPrefix(""),
 		twirp.WithClientInterceptors(twirpAuthInterceptor(cred.Token)),
@@ -245,7 +276,7 @@ func (c *Client) DialedAt() time.Time {
 
 func (c *Client) Connect(ctx context.Context, joinRequest *sfu_events.JoinRequest) (*sfu_events.JoinResponse, error) {
 	endpoint := c.cred.Load().Server.WsEndpoint
-	wsConn, _, _, err := ws.DefaultDialer.Dial(ctx, endpoint)
+	wsConn, err := wsdial.Dial(ctx, endpoint, c.dial, c.tlsConfig)
 	if err != nil {
 		return nil, err
 	}

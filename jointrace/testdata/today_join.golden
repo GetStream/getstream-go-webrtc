@@ -1,0 +1,27 @@
+join DAG (RTT coordinator 100.0 ms, RTT sfu 100.0 ms, RTT udp 100.0 ms)
+  step                   after                                  start       ms    RTT  timeline
+* coord.join             -                                        0.0    400.0   4.00  |=============                           |
+    .tcp                                                          0.0    100.0   1.00  |---                                     |
+    .tls                                                        100.0    200.0   2.00  |   -------                              |
+    .first_byte                                                 300.0    100.0   1.00  |         ----                           |
+    .server                                                     340.0     20.0  local  |           -                            | server-timing
+* pcs.create             coord.join                             400.0      2.0  local  |             =                          |
+* sfu.ws.dial            pcs.create                             402.0    300.0   3.00  |             ==========                 |
+* sfu.join               sfu.ws.dial                            702.0    100.0   1.00  |                      ====              |
+  pub.debounce           sfu.join                               802.0      0.5  timer  |                          -             |
+* sub.debounce           sfu.join                               802.0    148.0  timer  |                          =====         |
+  pub.offer              pub.debounce                           802.5      2.5  local  |                          -             |
+  pub.setpublisher       pub.offer                              805.0    100.0   1.00  |                          ----          |
+  pub.sfu.candidates     pub.setpublisher                       805.0     55.0   0.55  |                          --            |
+  pub.ice                pub.setpublisher,pub.sfu.candidates    906.0    100.0   1.00  |                             ----       |
+* sub.offer              sub.debounce                           950.0     50.0   0.50  |                               ==       |
+* sub.sendanswer         sub.offer                             1000.0    103.0   1.03  |                                ====    |
+* sub.ice                sub.sendanswer                        1003.0    100.0   1.00  |                                ====    |
+  pub.dtls               pub.ice                               1006.0    100.0   1.00  |                                ----    |
+* sub.dtls               sub.ice                               1103.0    100.0   1.00  |                                    === |
+  pub.rtp                pub.dtls                              1106.0      4.0  local  |                                    -   |
+* sub.rtp                sub.dtls                              1203.0     22.0  local  |                                       =|
+critical path: coord.join > pcs.create > sfu.ws.dial > sfu.join > sub.debounce > sub.offer > sub.sendanswer > sub.ice > sub.dtls > sub.rtp
+  1225.0 ms = 10.53 RTT (1053.0 ms network) + 148.0 ms timers + 24.0 ms local; 0.0 ms unaccounted waiting
+publish to media: 1160.0 ms from Join (first RTP sent + RTT/2)
+subscribe to media: 1225.0 ms from Join

@@ -38,7 +38,12 @@ func TestTimingRecordsEachConnectionStepInOrder(t *testing.T) {
 	st.waitForPCState(webrtc.PeerConnectionStateConnected, 2*time.Second)
 
 	timing := st.tr.Timing()
+	require.False(t, timing.NegotiationRequested.IsZero())
+	require.False(t, timing.OfferStarted.Before(timing.NegotiationRequested), "the offer waits for the debounce")
+	require.False(t, timing.FirstRemoteCandidate.IsZero(), "the remote peer trickles its candidates")
 	require.False(t, timing.ICEChecking.IsZero())
+	require.False(t, timing.ICEChecking.Before(timing.OfferStarted))
+	require.Positive(t, st.tr.SelectedPairRTT(), "ICE has measured the selected pair")
 	require.False(t, timing.ICEConnected.Before(timing.ICEChecking))
 	require.False(t, timing.DTLSConnected.Before(timing.ICEConnected), "DTLS runs on top of ICE")
 	require.False(t, timing.Connected.Before(timing.DTLSConnected))

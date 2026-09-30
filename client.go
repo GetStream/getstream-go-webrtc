@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"net/http"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,7 +15,9 @@ import (
 	"github.com/GetStream/getstream-go-webrtc/coordinator"
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/internal/atomicx"
+	"github.com/GetStream/getstream-go-webrtc/internal/netdelay"
 	"github.com/GetStream/getstream-go-webrtc/internal/xerr"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/rtcstats"
 )
@@ -58,6 +61,23 @@ type options struct {
 	// user is who NewRTCClient connects as. NewClient takes its user as an
 	// argument instead.
 	user User
+
+	// networkDelay is the round-trip time WithNetworkDelay adds to every connection.
+	networkDelay time.Duration
+}
+
+// WithNetworkDelay makes every connection the client opens behave as if it crossed a
+// network with round-trip time rtt: the coordinator REST and websocket connections, the
+// SFU websocket and RPCs, the location hint, and the peer connections' UDP sockets. Each
+// packet is held rtt/2 when sent and rtt/2 when received, in order, and a TCP connect
+// takes one rtt. It lets a test or bench against a local stack measure round trips as
+// if the stack were remote.
+//
+// For tests and benches only.
+func WithNetworkDelay(rtt time.Duration) Option {
+	return func(o *options) {
+		o.networkDelay = rtt
+	}
 }
 
 type Option func(*options)
@@ -285,6 +305,25 @@ type Client struct {
 	OwnUser      atomic.Pointer[models.OwnUserResponse]
 	Tracing      atomic.Pointer[rtcstats.TraceBuffer]
 	muStats      sync.RWMutex
+
+	// connectTrace holds the coordinator websocket's spans from NewClient. The first
+	// call to join claims them: later joins find the websocket already open.
+	connectTrace   *jointrace.Recorder
+	connectClaimed atomic.Bool
+}
+
+// claimConnectTrace copies the client's own connection spans into the first join's trace.
+func (c *Client) claimConnectTrace(rec *jointrace.Recorder) {
+	if rec == nil || c.connectTrace == nil || !c.connectClaimed.CompareAndSwap(false, true) {
+		return
+	}
+	t := c.connectTrace.Trace()
+	for _, s := range t.Spans {
+		rec.Add(s)
+	}
+	for peer, rtt := range t.RTT {
+		rec.SetRTT(peer, rtt)
+	}
 }
 
 func defaultClientOptions() options {
@@ -449,6 +488,9 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	if !c.withCoordinatorWS {
 		coordOptions = append(coordOptions, coordinator.WithoutWebsocket())
 	}
+	if o.networkDelay > 0 {
+		coordOptions = append(coordOptions, coordinator.WithDialContext(netdelay.Dialer(o.networkDelay, nil)))
+	}
 
 	cc, err := coordinator.NewClient(apiKey, userID, coordinator.StaticTokenProvider(tok),
 		coordinator.NoopHandler{}, coordOptions...)
@@ -470,10 +512,27 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 			Token: tok,
 		}
 		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, auth)
-		resp, err := connectWsWithRetries(ctx, cc, &auth)
+		rec := jointrace.NewRecorder(time.Now())
+		dialCtx := jointrace.WithStep(ctx, rec, jointrace.CoordWSDial, jointrace.PeerCoordinator)
+		start := time.Now()
+		resp, err := connectWsWithRetries(dialCtx, cc, &auth)
 		if err != nil {
 			return nil, err
 		}
+		// The upgrade response is the first byte back; the auth exchange follows it.
+		upgraded := jointrace.FirstByte(dialCtx)
+		if upgraded.IsZero() {
+			upgraded = start
+		}
+		rec.Add(jointrace.Span{
+			Name: jointrace.CoordWSDial, Start: start, End: upgraded,
+			Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
+		})
+		rec.Add(jointrace.Span{
+			Name: jointrace.CoordWSAuth, After: []string{jointrace.CoordWSDial}, Start: upgraded, End: time.Now(),
+			Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
+		})
+		c.connectTrace = rec
 		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
 		c.ConnectionID.Store(resp.ConnectionID)
 		c.OwnUser.Store(&resp.Me)
@@ -484,7 +543,13 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	c.CoordinatorClientInterface = cc
 	c.token.Store(tok)
 	if o.detectLocation {
-		c.locationDiscovery = NewCloudFrontDiscovery(o.locationHintURL, 3, locationHTTPClient, c.logger)
+		httpClient := locationHTTPClient
+		if o.networkDelay > 0 {
+			tr := locationHTTPClient.Transport.(*http.Transport).Clone()
+			tr.DialContext = netdelay.Dialer(o.networkDelay, tr.DialContext)
+			httpClient = &http.Client{Transport: tr, Timeout: locationHTTPClient.Timeout + 3*o.networkDelay}
+		}
+		c.locationDiscovery = NewCloudFrontDiscovery(o.locationHintURL, 3, httpClient, c.logger)
 	}
 	return c, nil
 }
@@ -554,10 +619,15 @@ func (c *Client) AddVideoSourceStatsProviders(providers ...VideoSourceStatsProvi
 	c.videoSourceStatsProviders = append(c.videoSourceStatsProviders, providers...)
 }
 
-func (c *Client) detectLocationCached(ctx context.Context) string {
+func (c *Client) detectLocationCached(ctx context.Context, rec *jointrace.Recorder) string {
 	if c.locationCache.Load() == "" {
 		c.logger.Info("Join call request without location, discovering location...")
-		loc := c.locationDiscovery.Discover(ctx)
+		start := time.Now()
+		loc := c.locationDiscovery.Discover(jointrace.WithStep(ctx, rec, jointrace.LocationHint, jointrace.PeerCloudFront))
+		rec.Add(jointrace.Span{
+			Name: jointrace.LocationHint, After: afterFirst(rec, jointrace.CoordWSAuth),
+			Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCloudFront,
+		})
 		c.locationCache.Store(loc)
 		c.logger.Infof("%q location discovered", loc)
 	}
@@ -653,16 +723,27 @@ func (c *Client) joinCoordinator(
 	ctx context.Context,
 	callType, id string,
 	joinCallRequest models.JoinCallRequest,
+	rec *jointrace.Recorder,
 ) (*models.JoinCallResponse, GetCredentialsFunc, error) {
 	if joinCallRequest.Location == "" && c.detectLocation {
-		joinCallRequest.Location = c.detectLocationCached(ctx)
+		joinCallRequest.Location = c.detectLocationCached(ctx, rec)
 	}
 
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectEvent, joinCallRequest)
-	result, err := c.connectWithRetries(ctx, callType, id, joinCallRequest)
+	start := time.Now()
+	joinCtx := jointrace.WithStep(ctx, rec, jointrace.CoordJoin, jointrace.PeerCoordinator)
+	result, err := c.connectWithRetries(joinCtx, callType, id, joinCallRequest)
 	if err != nil {
 		return nil, nil, err
 	}
+	note := ""
+	if jointrace.Reused(joinCtx) {
+		note = "reused connection"
+	}
+	rec.Add(jointrace.Span{
+		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.LocationHint, jointrace.CoordWSAuth),
+		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
+	})
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectedEvent, result)
 
 	getCred := func(forceReload bool, excludeSFUID string) (models.Credentials, error) {
