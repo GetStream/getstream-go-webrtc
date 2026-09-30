@@ -124,6 +124,27 @@ func TestJoinCallRequestPath(t *testing.T) {
 	}}, resp.Credentials.IceServers)
 }
 
+func TestJoinCallCarriesTheJoinQuery(t *testing.T) {
+	t.Parallel()
+
+	queries := make(chan map[string][]string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		queries <- r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	defer srv.Close()
+
+	client := newTestClient(t, coordinator.ApiURL(srv.URL),
+		coordinator.WithJoinQuery(map[string][]string{"sfu_id": {"sfu-2"}}))
+	_, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{}, nil)
+	require.NoError(t, err)
+
+	q := <-queries
+	require.Equal(t, []string{"sfu-2"}, q["sfu_id"])
+	require.Equal(t, []string{"api-key"}, q["api_key"], "next to the usual parameters")
+}
+
 // A join the coordinator refused must not look retryable, or Client.connectWithRetries
 // keeps asking until the context expires instead of reporting what the server said.
 func TestJoinCallReportsARefusalAsFinal(t *testing.T) {
