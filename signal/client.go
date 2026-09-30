@@ -128,7 +128,8 @@ var defaultOptions = options{
 var _ sfu_signal_rpc.SignalServer = (*Client)(nil)
 
 type Client struct {
-	rpc atomic.Value
+	rpc     atomic.Value
+	fastRPC atomic.Value
 	options
 
 	signalEventStore *event.Store[*sfu_events.SfuEvent]
@@ -250,8 +251,7 @@ func NewClient(cred models.Credentials, handler Handler, opts ...Option) *Client
 	if o.withTracing {
 		client.Tracing.Store(rtcstats.NewClientTraceBuffer(""))
 	}
-	client.setRPC(client.getSignalRPCClient(cred))
-	client.cred.Store(&cred)
+	client.SetCredentials(cred)
 	return client
 }
 
@@ -260,21 +260,45 @@ func (c *Client) getSignalRPCClient(cred models.Credentials) sfu_signal_rpc.Sign
 	if c.format == websocket.FormatText {
 		clientCreator = sfu_signal_rpc.NewSignalServerJSONClient
 	}
-	rpcClient := clientCreator(
-		cred.Server.URL,
-		&http.Client{
-			Timeout:   5 * time.Second,
-			Transport: rtretry.NewRoundTripperRetryer(c.transport),
-		},
+	return clientCreator(cred.Server.URL, c.rpcHTTPClient(), c.rpcClientOptions(cred)...)
+}
+
+// getFastJoinRPCClient is the FastJoinServer twin of getSignalRPCClient: same base URL,
+// HTTP client and authorization.
+func (c *Client) getFastJoinRPCClient(cred models.Credentials) sfu_signal_rpc.FastJoinServer {
+	clientCreator := sfu_signal_rpc.NewFastJoinServerProtobufClient
+	if c.format == websocket.FormatText {
+		clientCreator = sfu_signal_rpc.NewFastJoinServerJSONClient
+	}
+	return clientCreator(cred.Server.URL, c.rpcHTTPClient(), c.rpcClientOptions(cred)...)
+}
+
+func (c *Client) rpcHTTPClient() *http.Client {
+	return &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: rtretry.NewRoundTripperRetryer(c.transport),
+	}
+}
+
+func (c *Client) rpcClientOptions(cred models.Credentials) []twirp.ClientOption {
+	return []twirp.ClientOption{
 		twirp.WithClientPathPrefix(""),
 		twirp.WithClientInterceptors(twirpAuthInterceptor(cred.Token)),
-	)
-	return rpcClient
+	}
 }
 
 func (c *Client) SetCredentials(cred models.Credentials) {
 	c.cred.Store(&cred)
 	c.setRPC(c.getSignalRPCClient(cred))
+	c.fastRPC.Store(c.getFastJoinRPCClient(cred))
+}
+
+// FastJoin joins the SFU in one request: it creates the call from the request's setup
+// grant if needed, answers the publisher offer and returns the subscriber offer. The
+// websocket then attaches to the participant it created: Connect with a JoinRequest
+// that has AttachFastJoin set.
+func (c *Client) FastJoin(ctx context.Context, request *sfu_signal_rpc.FastJoinRequest) (*sfu_signal_rpc.FastJoinResponse, error) {
+	return c.fastRPC.Load().(sfu_signal_rpc.FastJoinServer).FastJoin(ctx, request)
 }
 
 // DialedAt is when the last websocket to the SFU finished opening, or the zero time if
@@ -288,6 +312,28 @@ func (c *Client) DialedAt() time.Time {
 }
 
 func (c *Client) Connect(ctx context.Context, joinRequest *sfu_events.JoinRequest) (*sfu_events.JoinResponse, error) {
+	dialed, err := c.Dial(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.Join(ctx, dialed, joinRequest)
+}
+
+// Dialed is a websocket to the SFU that has not sent its JoinRequest yet.
+type Dialed struct {
+	conn     *websocket.Connection[sfu_events.SfuEvent, sfu_events.SfuRequest]
+	endpoint string
+}
+
+// Close drops a websocket that will not be joined.
+func (d *Dialed) Close() {
+	_ = d.conn.Close()
+}
+
+// Dial opens the websocket to the SFU without joining: Join sends the JoinRequest. A
+// fast join dials while its FastJoin is in flight, and attaches once the SFU has
+// created the participant.
+func (c *Client) Dial(ctx context.Context) (*Dialed, error) {
 	endpoint := c.cred.Load().Server.WsEndpoint
 	wsConn, err := wsdial.Dial(ctx, endpoint, c.dial, c.tlsConfig)
 	if err != nil {
@@ -313,6 +359,13 @@ func (c *Client) Connect(ctx context.Context, joinRequest *sfu_events.JoinReques
 		})
 
 	conn := websocket.NewConnection[sfu_events.SfuEvent, sfu_events.SfuRequest](wsConn, true, websocket.FormatBinary, codec)
+	return &Dialed{conn: conn, endpoint: endpoint}, nil
+}
+
+// Join sends joinRequest on a dialed websocket and waits for the SFU's JoinResponse.
+// It takes ownership of dialed: on any error the websocket is closed.
+func (c *Client) Join(ctx context.Context, dialed *Dialed, joinRequest *sfu_events.JoinRequest) (*sfu_events.JoinResponse, error) {
+	conn, endpoint := dialed.conn, dialed.endpoint
 
 	// Every path out of here other than a JoinResponse abandons conn: without
 	// this the websocket stays open with nothing reading it, and a first join
