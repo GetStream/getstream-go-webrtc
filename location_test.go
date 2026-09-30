@@ -1,155 +1,85 @@
-package rtc_test
+package rtc
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	rtc "github.com/GetStream/getstream-go-webrtc"
-	"github.com/GetStream/getstream-go-webrtc/logger"
+	"github.com/GetStream/getstream-go-webrtc/coordinator"
+	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
+	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
+	"github.com/GetStream/getstream-go-webrtc/jointrace"
 )
 
-type MockHTTPClient struct {
-	DoFunc func(req *http.Request) (*http.Response, error)
-}
-
-func (m *MockHTTPClient) Do(req *http.Request) (*http.Response, error) {
-	return m.DoFunc(req)
-}
-
-func TestCloudFrontDiscoveryHappy(t *testing.T) {
+// TestJoinSendsLocationAuto joins through a fake coordinator: without WithLocation the
+// join asks the coordinator to place the client by GeoIP, and nothing but the
+// coordinator and the SFU is contacted on the way.
+func TestJoinSendsLocationAuto(t *testing.T) {
 	t.Parallel()
 
-	mockClient := &MockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{rtc.HeaderCloudFrontPop: []string{"DFW3-C3"}},
-				Body:       http.NoBody,
-			}, nil
-		},
-	}
+	for name, tc := range map[string]struct {
+		opts []JoinOption
+		want string
+	}{
+		"default":       {want: LocationAuto},
+		"with location": {opts: []JoinOption{WithLocation("AMS")}, want: "AMS"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-	cfd := rtc.NewCloudFrontDiscovery("http://example.com", 3, mockClient, logger.Noop{})
-	result := cfd.Discover(context.Background())
+			const userID = "location-user"
+			sfu := testutil.NewFakeSFU()
+			t.Cleanup(sfu.Close)
+			token, err := testutil.GenerateToken("test-api-key", "test-api-secret", userID, time.Hour)
+			require.NoError(t, err)
 
-	assert.Equal(t, "DFW", result)
-}
+			var mu sync.Mutex
+			var locations []string
+			coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req models.JoinCallRequest
+				if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				mu.Lock()
+				locations = append(locations, req.Location)
+				mu.Unlock()
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(sfu, "sfu-fake", token.Token)})
+			}))
+			t.Cleanup(coord.Close)
 
-func TestCloudFrontDiscoveryRetriesFallback(t *testing.T) {
-	t.Parallel()
+			client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
+				WithCoordinatorOptions(coordinator.ApiURL(coord.URL)), WithoutCoordinatorWS())
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = client.Close() })
 
-	var calls int
+			call := client.Call(testutil.DefaultCallType, "location-call")
+			call.onceConnect.Do(func() {})
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			_, err = call.Join(ctx, tc.opts...)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = call.Leave("test over") })
 
-	mockClient := &MockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
-			calls++
-			return &http.Response{
-				StatusCode: http.StatusBadGateway,
-				Header:     http.Header{rtc.HeaderCloudFrontPop: []string{"DFW3-C3"}},
-				Body:       http.NoBody,
-			}, nil
-		},
-	}
-
-	cfd := rtc.NewCloudFrontDiscovery("http://example.com", 3, mockClient, logger.Noop{})
-	result := cfd.Discover(context.Background())
-
-	assert.Equal(t, 3, calls)
-	assert.Equal(t, rtc.FallbackLocationName, result)
-}
-
-func TestCloudFrontDiscoveryRetriesOnErr(t *testing.T) {
-	t.Parallel()
-
-	var calls int
-
-	mockClient := &MockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
-			calls++
-			return nil, errors.New("oh no")
-		},
-	}
-
-	cfd := rtc.NewCloudFrontDiscovery("http://example.com", 3, mockClient, logger.Noop{})
-	result := cfd.Discover(context.Background())
-
-	assert.Equal(t, 3, calls)
-	assert.Equal(t, rtc.FallbackLocationName, result)
-}
-
-func TestCloudFrontDiscoveryRetriesWorks(t *testing.T) {
-	t.Parallel()
-
-	var calls int
-
-	mockClient := &MockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
-			defer func() { calls++ }()
-			if calls == 1 {
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Header:     http.Header{rtc.HeaderCloudFrontPop: []string{"DFW3-C3"}},
-					Body:       http.NoBody,
-				}, nil
+			mu.Lock()
+			require.Equal(t, []string{tc.want}, locations)
+			mu.Unlock()
+			trace := call.JoinTrace()
+			_, ok := trace.Span(jointrace.CoordJoin)
+			require.True(t, ok, "the join went through the coordinator")
+			for _, s := range trace.Spans {
+				if s.Kind == jointrace.KindNet {
+					require.Contains(t, []jointrace.Peer{jointrace.PeerCoordinator, jointrace.PeerSFU, jointrace.PeerUDP},
+						s.Peer, "%s talks to %s", s.Name, s.Peer)
+				}
 			}
-			return nil, errors.New("oh no")
-		},
+		})
 	}
-
-	cfd := rtc.NewCloudFrontDiscovery("http://example.com", 3, mockClient, logger.Noop{})
-	result := cfd.Discover(context.Background())
-
-	assert.Equal(t, 2, calls)
-	assert.Equal(t, "DFW", result)
-}
-
-func TestCloudFrontDiscoveryBadResponse(t *testing.T) {
-	t.Parallel()
-
-	var calls int
-
-	mockClient := &MockHTTPClient{
-		DoFunc: func(req *http.Request) (*http.Response, error) {
-			defer func() { calls++ }()
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{rtc.HeaderCloudFrontPop: []string{""}},
-				Body:       http.NoBody,
-			}, nil
-		},
-	}
-
-	cfd := rtc.NewCloudFrontDiscovery("http://example.com", 3, mockClient, logger.Noop{})
-	result := cfd.Discover(context.Background())
-
-	assert.Equal(t, 1, calls)
-	assert.Equal(t, rtc.FallbackLocationName, result)
-}
-
-// TestCloudFrontDiscoveryOverHTTP covers what the upstream integration test
-// covered - that the discovery works end to end over a real HTTP client - but
-// against a local server instead of hint.stream-io-video.com, so it does not
-// need network access.
-func TestCloudFrontDiscoveryOverHTTP(t *testing.T) {
-	t.Parallel()
-
-	var gotMethod, gotPath string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod, gotPath = r.Method, r.URL.Path
-		w.Header().Set(rtc.HeaderCloudFrontPop, "AMS53-P4")
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer srv.Close()
-
-	cfd := rtc.NewCloudFrontDiscovery(srv.URL+"/", 3, srv.Client(), logger.Noop{})
-	require.Equal(t, "AMS", cfd.Discover(context.Background()))
-
-	assert.Equal(t, http.MethodHead, gotMethod, "location discovery must not download a body")
-	assert.Equal(t, "/", gotPath)
 }

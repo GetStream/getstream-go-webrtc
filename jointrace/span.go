@@ -26,7 +26,6 @@ type Peer string
 const (
 	PeerCoordinator Peer = "coordinator"
 	PeerSFU         Peer = "sfu"
-	PeerCloudFront  Peer = "cloudfront"
 	// PeerUDP is the media path to the SFU: ICE, DTLS and RTP.
 	PeerUDP   Peer = "udp"
 	PeerLocal Peer = "local"
@@ -36,7 +35,6 @@ const (
 const (
 	CoordWSDial      = "coord.ws.dial"
 	CoordWSAuth      = "coord.ws.auth"
-	LocationHint     = "location.hint"
 	CoordJoin        = "coord.join"
 	PCsCreate        = "pcs.create"
 	SFUWSDial        = "sfu.ws.dial"

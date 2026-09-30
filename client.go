@@ -24,7 +24,6 @@ import (
 
 type options struct {
 	coordinatorOptions     []coordinator.Option
-	detectLocation         bool
 	logger                 logger.ILogger
 	clientDetails          ClientDetails
 	statsReportingInterval time.Duration
@@ -36,10 +35,6 @@ type options struct {
 	connectTimeout time.Duration
 
 	withCoordinatorWS bool
-
-	// locationHintURL is probed to discover the nearest edge. Empty means
-	// DefaultLocationHintURL.
-	locationHintURL string
 
 	// iceRecoveryConfig tunes how peer connection failures are repaired before
 	// the call falls back to a full reconnect.
@@ -68,7 +63,7 @@ type options struct {
 
 // WithNetworkDelay makes every connection the client opens behave as if it crossed a
 // network with round-trip time rtt: the coordinator REST and websocket connections, the
-// SFU websocket and RPCs, the location hint, and the peer connections' UDP sockets. Each
+// SFU websocket and RPCs, and the peer connections' UDP sockets. Each
 // packet is held rtt/2 when sent and rtt/2 when received, in order, and a TCP connect
 // takes one rtt. It lets a test or bench against a local stack measure round trips as
 // if the stack were remote.
@@ -103,24 +98,9 @@ func WithLogger(l logger.ILogger) Option {
 	}
 }
 
-// WithLocationHintURL overrides the endpoint probed to find the nearest edge.
-// It is only consulted when location discovery is enabled.
-func WithLocationHintURL(url string) Option {
-	return func(o *options) {
-		o.locationHintURL = url
-	}
-}
-
 func WithoutCoordinatorWS() Option {
 	return func(o *options) {
 		o.withCoordinatorWS = false
-	}
-}
-
-// WithoutLocationDiscovery disables the automatic CloudFront-based location lookup.
-func WithoutLocationDiscovery() Option {
-	return func(o *options) {
-		o.detectLocation = false
 	}
 }
 
@@ -292,11 +272,9 @@ func StaticToken(token string) TokenProvider {
 }
 
 type Client struct {
-	apiKey            string
-	token             atomicx.AtomicValue[string]
-	locationCache     atomicx.AtomicValue[string]
-	locationDiscovery LocationDiscovery
-	server            *getstream.Stream
+	apiKey string
+	token  atomicx.AtomicValue[string]
+	server *getstream.Stream
 	options
 	coordinator.CoordinatorClientInterface
 	User         User
@@ -350,12 +328,11 @@ func (c *Client) shareRTTs(rec *jointrace.Recorder) {
 	if c.knownRTT == nil {
 		c.knownRTT = make(map[jointrace.Peer]time.Duration, 2)
 	}
-	for _, peer := range []jointrace.Peer{jointrace.PeerCoordinator, jointrace.PeerCloudFront} {
-		if rtt := rec.RTT(peer); rtt > 0 {
-			c.knownRTT[peer] = rtt
-		} else {
-			rec.SetRTT(peer, c.knownRTT[peer])
-		}
+	peer := jointrace.PeerCoordinator
+	if rtt := rec.RTT(peer); rtt > 0 {
+		c.knownRTT[peer] = rtt
+	} else {
+		rec.SetRTT(peer, c.knownRTT[peer])
 	}
 }
 
@@ -442,7 +419,6 @@ func (c *Client) watchCall(ctx context.Context, callType, id string) {
 
 func defaultClientOptions() options {
 	return options{
-		detectLocation:    true,
 		withCoordinatorWS: true,
 		logger:            logger.Noop{},
 		clientDetails: ClientDetails{
@@ -640,15 +616,6 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	} else {
 		close(c.wsReady)
 	}
-	if o.detectLocation {
-		tr := locationHTTPClient.Transport.(*http.Transport).Clone()
-		httpClient := &http.Client{Transport: tr, Timeout: locationHTTPClient.Timeout}
-		if o.networkDelay > 0 {
-			tr.DialContext = netdelay.Dialer(o.networkDelay, tr.DialContext)
-			httpClient.Timeout += 3 * o.networkDelay
-		}
-		c.locationDiscovery = NewCloudFrontDiscovery(o.locationHintURL, 3, httpClient, c.logger)
-	}
 	return c, nil
 }
 
@@ -769,20 +736,6 @@ func (c *Client) AddVideoSourceStatsProviders(providers ...VideoSourceStatsProvi
 	c.videoSourceStatsProviders = append(c.videoSourceStatsProviders, providers...)
 }
 
-func (c *Client) detectLocationCached(ctx context.Context, rec *jointrace.Recorder) string {
-	if c.locationCache.Load() == "" {
-		c.logger.Info("Join call request without location, discovering location...")
-		start := time.Now()
-		loc := c.locationDiscovery.Discover(jointrace.WithStep(ctx, rec, jointrace.LocationHint, jointrace.PeerCloudFront))
-		rec.Add(jointrace.Span{
-			Name: jointrace.LocationHint, Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCloudFront,
-		})
-		c.locationCache.Store(loc)
-		c.logger.Infof("%q location discovered", loc)
-	}
-	return c.locationCache.Load()
-}
-
 func (c *Client) connectWithRetries(
 	ctx context.Context,
 	_type, id string,
@@ -871,18 +824,18 @@ func connectWsWithRetries(
 	}
 }
 
-// joinCoordinator performs the coordinator half of a join: it resolves the
-// caller's location if needed, POSTs to /join and returns both the response and
-// a GetCredentialsFunc the call can use to re-fetch credentials during a
-// reconnect or migration.
+// joinCoordinator performs the coordinator half of a join: it POSTs to /join and
+// returns both the response and a GetCredentialsFunc the call can use to re-fetch
+// credentials during a reconnect or migration. Without a location the coordinator
+// places the client by GeoIP on its address (LocationAuto).
 func (c *Client) joinCoordinator(
 	ctx context.Context,
 	callType, id string,
 	joinCallRequest models.JoinCallRequest,
 	rec *jointrace.Recorder,
 ) (*models.JoinCallResponse, GetCredentialsFunc, error) {
-	if joinCallRequest.Location == "" && c.detectLocation {
-		joinCallRequest.Location = c.detectLocationCached(ctx, rec)
+	if joinCallRequest.Location == "" {
+		joinCallRequest.Location = LocationAuto
 	}
 
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectEvent, joinCallRequest)
@@ -897,7 +850,7 @@ func (c *Client) joinCoordinator(
 		note = "reused connection"
 	}
 	rec.Add(jointrace.Span{
-		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.LocationHint),
+		Name:  jointrace.CoordJoin,
 		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
 	})
 	c.shareRTTs(rec)

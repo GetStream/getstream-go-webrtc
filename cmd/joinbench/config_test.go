@@ -28,6 +28,7 @@ func TestParseConfigDefaultsToTheLocalStack(t *testing.T) {
 	require.InDelta(t, 3.5, c.Budget, 0)
 	require.Equal(t, localBaseURL, c.BaseURL)
 	require.Equal(t, localWSURL, c.WSURL)
+	require.Equal(t, "auto", c.Location)
 }
 
 func TestParseConfigReadsTheFlags(t *testing.T) {
@@ -35,7 +36,7 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 
 	c, err := parseConfig([]string{
 		"-mode", "warm", "-scenario", "pubsub, one-to-one", "-rtt", "0", "-runs", "3",
-		"-sfu", "sfu-2", "-location", "auto", "-budget", "4", "-out", "x.jsonl",
+		"-sfu", "sfu-2", "-location", "AMS", "-budget", "4", "-out", "x.jsonl",
 	}, env(map[string]string{
 		"STREAM_BASE_URL": "http://127.0.0.1:4030", "STREAM_WS_URL": "ws://127.0.0.1:4800/api/v2/connect",
 		"STREAM_API_KEY": "key", "STREAM_API_SECRET": "secret",
@@ -45,7 +46,7 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 	require.Equal(t, []string{scenarioPubSub, scenarioOneToOne}, c.Scenarios)
 	require.Zero(t, c.RTT, "an explicit 0 turns the delay off")
 	require.Equal(t, 3, c.Runs)
-	require.Equal(t, "auto", c.Location)
+	require.Equal(t, "AMS", c.Location)
 	require.InDelta(t, 4, c.Budget, 0)
 	require.Equal(t, "x.jsonl", c.Out)
 	require.Equal(t, "http://127.0.0.1:4030", c.BaseURL)

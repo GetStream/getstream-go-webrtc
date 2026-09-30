@@ -68,9 +68,6 @@ func (b *bench) newClient(user string) (*rtc.Client, error) {
 	if b.cfg.RTT > 0 {
 		opts = append(opts, rtc.WithNetworkDelay(b.cfg.RTT))
 	}
-	if b.cfg.Location != "" {
-		opts = append(opts, rtc.WithoutLocationDiscovery())
-	}
 	if b.cfg.Debug {
 		l := logrus.New()
 		l.SetOutput(os.Stderr)
