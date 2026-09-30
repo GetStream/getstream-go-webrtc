@@ -169,12 +169,21 @@ func (s *step) clientTrace() *httptrace.ClientTrace {
 // Server-Timing response header, as a detail span centred in the wait for the first
 // byte. It uses the "total" metric when the header has one, otherwise the longest.
 func ServerTiming(ctx context.Context, header string) {
-	s, _ := ctx.Value(stepKey{}).(*step)
-	if s == nil || header == "" {
+	if header == "" {
 		return
 	}
 	dur, ok := parseServerTiming(header)
 	if !ok {
+		return
+	}
+	ServerDuration(ctx, dur, "server-timing: "+header)
+}
+
+// ServerDuration records dur, the server's own time for the context's step as the
+// server reported it in the response body, as ServerTiming does from a header.
+func ServerDuration(ctx context.Context, dur time.Duration, note string) {
+	s, _ := ctx.Value(stepKey{}).(*step)
+	if s == nil || dur <= 0 {
 		return
 	}
 	s.mu.Lock()
@@ -188,7 +197,7 @@ func ServerTiming(ctx context.Context, header string) {
 		dur = wait
 	}
 	start := wrote.Add((wait - dur) / 2)
-	s.detail(DetailServer, start, start.Add(dur), KindLocal, "server-timing")
+	s.detail(DetailServer, start, start.Add(dur), KindLocal, note)
 }
 
 func parseServerTiming(header string) (time.Duration, bool) {

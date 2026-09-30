@@ -116,6 +116,36 @@ func TestRecorderKeepsTheFirstRecording(t *testing.T) {
 	require.Empty(t, nilRec.Trace().Spans)
 }
 
+// TestScratchSpansCountOnlyOnceMerged is a fast join's candidates: each records into its
+// own scratch recorder, and only the one that took the client is merged.
+func TestScratchSpansCountOnlyOnceMerged(t *testing.T) {
+	rec := NewRecorder(t0)
+	rec.Add(Span{Name: CoordFastJoin, Start: at(0), End: at(100)})
+	failed, won := rec.Scratch(), rec.Scratch()
+	failed.Add(Span{Name: SFUWSDial, Start: at(100), End: at(150)})
+	failed.SetRTT(PeerSFU, 30*time.Millisecond)
+	won.Add(Span{Name: SFUWSDial, Start: at(160), End: at(360)})
+	won.Add(Span{Name: SFUWSDial + DetailTCP, Parent: SFUWSDial, Start: at(160), End: at(260)})
+	won.SetRTT(PeerSFU, 100*time.Millisecond)
+	won.Add(Span{Name: CoordFastJoin, Start: at(1), End: at(2)})
+	rec.Merge(won)
+
+	tr := rec.Trace()
+	require.Len(t, tr.Spans, 3)
+	dial, _ := tr.Span(SFUWSDial)
+	require.Equal(t, at(160), dial.Start, "the candidate that took the client")
+	coord, _ := tr.Span(CoordFastJoin)
+	require.Equal(t, at(100), coord.End, "a merge keeps what was recorded first")
+	require.Equal(t, 100*time.Millisecond, tr.RTT[PeerSFU])
+
+	rec.Remove(SFUWSDial)
+	require.Len(t, rec.Trace().Spans, 1, "with its detail spans")
+
+	var nilRec *Recorder
+	require.Nil(t, nilRec.Scratch())
+	nilRec.Merge(won)
+}
+
 func TestReportRoundTripsAsJSON(t *testing.T) {
 	tr := todayJoin()
 	raw, err := json.Marshal(tr)
