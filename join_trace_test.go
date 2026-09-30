@@ -320,15 +320,16 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 	require.True(t, ok, "and records the SFU side")
 }
 
-// TestCoordinatorRTTIsTheUpgradeRoundTrip puts the coordinator behind an edge: the TCP
-// connect is answered 10 ms away, the websocket upgrade 100 ms away. Coordinator steps
-// are counted in the upgrade's round trip, the one every request pays.
-func TestCoordinatorRTTIsTheUpgradeRoundTrip(t *testing.T) {
+// TestCoordinatorRTTIsTheWebsocketRoundTrip puts the coordinator behind an edge: the
+// TCP connect is answered 10 ms away, the coordinator 100 ms away, and the upgrade costs
+// it 50 ms of work more than the auth. Coordinator steps are counted in the faster
+// websocket exchange: the round trip every request pays.
+func TestCoordinatorRTTIsTheWebsocketRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	const edge, backend = 10 * time.Millisecond, 90 * time.Millisecond
+	const edge, backend, work = 10 * time.Millisecond, 90 * time.Millisecond, 50 * time.Millisecond
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(backend)
+		time.Sleep(backend + work)
 		conn, _, _, err := ws.UpgradeHTTP(r, w)
 		if err != nil {
 			return
@@ -337,6 +338,7 @@ func TestCoordinatorRTTIsTheUpgradeRoundTrip(t *testing.T) {
 		if _, err := wsutil.ReadClientText(conn); err != nil {
 			return
 		}
+		time.Sleep(backend)
 		_ = wsutil.WriteServerText(conn, []byte(`{"type":"connection.ok","connection_id":"conn-1","me":{"id":"edge-user"}}`))
 		for {
 			if _, _, err := wsutil.ReadClientData(conn); err != nil {

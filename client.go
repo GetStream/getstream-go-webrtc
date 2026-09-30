@@ -575,11 +575,16 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 		})
 		// The coordinator sits behind a load balancer that accepts TCP (and TLS) at an
 		// edge near the client, so the connect time is the round trip to that edge. The
-		// upgrade is answered by the coordinator itself, with no work: its round trip is
-		// the one every coordinator request pays.
-		if upgrade, ok := rec.Get(jointrace.CoordWSDial + jointrace.DetailFirstByte); ok {
-			rec.ReplaceRTT(jointrace.PeerCoordinator, upgrade.Duration())
+		// upgrade and the auth exchange are answered by the coordinator itself: the
+		// faster of the two is the round trip every coordinator request pays, plus the
+		// little server time neither can shed.
+		rtt := time.Duration(0)
+		for _, name := range []string{jointrace.CoordWSDial + jointrace.DetailFirstByte, jointrace.CoordWSAuth} {
+			if s, ok := rec.Get(name); ok && s.Duration() > 0 && (rtt == 0 || s.Duration() < rtt) {
+				rtt = s.Duration()
+			}
 		}
+		rec.ReplaceRTT(jointrace.PeerCoordinator, rtt)
 		c.connectTrace = rec
 		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
 		c.ConnectionID.Store(resp.ConnectionID)
