@@ -28,8 +28,6 @@ type runResult struct {
 	SFU           string  `json:"sfu,omitempty"`
 	Location      string  `json:"location,omitempty"`
 	InjectedRTTMs float64 `json:"injected_rtt_ms"`
-	// NoWatch is set when the join went without the websocket's connection id (-watch=false).
-	NoWatch bool `json:"no_watch,omitempty"`
 
 	// RTTc and RTTs are the measured round trips to the coordinator and the SFU,
 	// averaged over the run's traces; RTTudp the media path's.

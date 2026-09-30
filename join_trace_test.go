@@ -356,6 +356,7 @@ func TestCoordinatorRTTIsTheWebsocketRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 
+	require.True(t, client.awaitWS(context.Background()))
 	trace := client.connectTrace.Trace()
 	tcp, ok := trace.Span(jointrace.CoordWSDial + jointrace.DetailTCP)
 	require.True(t, ok)

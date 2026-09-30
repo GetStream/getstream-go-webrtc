@@ -410,6 +410,7 @@ func (c *Call) joinCoordinator(ctx context.Context, options joinOptions) error {
 		return xerr.Wrap(err)
 	}
 	c.GetCred = getCred
+	c.cc.watchCall(c.callCtx, c.Type, c.Id)
 
 	cred := result.Credentials
 	// Store the coordinator state before building the signal client: the

@@ -306,10 +306,17 @@ type Client struct {
 	Tracing      atomic.Pointer[rtcstats.TraceBuffer]
 	muStats      sync.RWMutex
 
-	// connectTrace holds the coordinator websocket's spans from NewClient. The first
-	// call to join claims them: later joins find the websocket already open.
-	connectTrace   *jointrace.Recorder
-	connectClaimed atomic.Bool
+	// wsReady is closed when the coordinator websocket NewClient started in the
+	// background has connected or given up; ConnectionID is empty in the latter case.
+	wsReady  chan struct{}
+	wsCancel context.CancelFunc
+
+	// connectTrace holds the coordinator websocket's spans once it is up. The first
+	// join claims them into connectClaim, whichever of the two comes first: later joins
+	// find the websocket already open.
+	connectMu    sync.Mutex
+	connectTrace *jointrace.Recorder
+	connectClaim *jointrace.Recorder
 
 	// knownRTT is the last round-trip time measured to each peer, for a join whose
 	// requests reuse an open connection and so measure none of their own.
@@ -323,6 +330,9 @@ type Client struct {
 
 // Close closes the coordinator connections and any idle SFU connection.
 func (c *Client) Close() error {
+	if c.wsCancel != nil {
+		c.wsCancel()
+	}
 	if c.sfuTransport != nil {
 		c.sfuTransport.CloseIdleConnections()
 	}
@@ -349,18 +359,85 @@ func (c *Client) shareRTTs(rec *jointrace.Recorder) {
 	}
 }
 
-// claimConnectTrace copies the client's own connection spans into the first join's trace.
+// claimConnectTrace makes rec, the first join's trace, the one the client's own
+// websocket spans go into: now if the websocket is up, else when it comes up.
 func (c *Client) claimConnectTrace(rec *jointrace.Recorder) {
-	if rec == nil || c.connectTrace == nil || !c.connectClaimed.CompareAndSwap(false, true) {
+	if rec == nil {
 		return
 	}
-	t := c.connectTrace.Trace()
+	c.connectMu.Lock()
+	if c.connectClaim != nil {
+		c.connectMu.Unlock()
+		return
+	}
+	c.connectClaim = rec
+	ws := c.connectTrace
+	c.connectMu.Unlock()
+	copyConnectTrace(ws, rec)
+}
+
+// connected publishes the websocket's spans, to the first join's trace if one has
+// claimed them, and its RTT_c to later joins.
+func (c *Client) connected(ws *jointrace.Recorder) {
+	c.connectMu.Lock()
+	c.connectTrace = ws
+	claim := c.connectClaim
+	c.connectMu.Unlock()
+	copyConnectTrace(ws, claim)
+
+	if rtt := ws.RTT(jointrace.PeerCoordinator); rtt > 0 {
+		c.rttMu.Lock()
+		if c.knownRTT == nil {
+			c.knownRTT = make(map[jointrace.Peer]time.Duration, 2)
+		}
+		c.knownRTT[jointrace.PeerCoordinator] = rtt
+		c.rttMu.Unlock()
+	}
+}
+
+// copyConnectTrace adds the websocket's spans to rec. Its RTT_c replaces the one a
+// join measured on its own: a TCP connect may end at a load balancer's edge.
+func copyConnectTrace(ws, rec *jointrace.Recorder) {
+	if ws == nil || rec == nil {
+		return
+	}
+	t := ws.Trace()
 	for _, s := range t.Spans {
 		rec.Add(s)
 	}
 	for peer, rtt := range t.RTT {
-		rec.SetRTT(peer, rtt)
+		rec.ReplaceRTT(peer, rtt)
 	}
+}
+
+// awaitWS waits for the background websocket connect to finish and reports whether
+// it connected.
+func (c *Client) awaitWS(ctx context.Context) bool {
+	if c.wsReady == nil {
+		return false
+	}
+	select {
+	case <-c.wsReady:
+		return c.ConnectionID.Load() != ""
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// watchCall subscribes the coordinator websocket to the call's events once it is up.
+// Events sent before that are not delivered; the SFU's arrive on the SFU websocket.
+func (c *Client) watchCall(ctx context.Context, callType, id string) {
+	if !c.withCoordinatorWS {
+		return
+	}
+	go func() {
+		if !c.awaitWS(ctx) {
+			return
+		}
+		if err := c.WatchCall(ctx, callType, id, c.ConnectionID.Load()); err != nil && ctx.Err() == nil {
+			c.logger.Warnf("coordinator websocket gets no events for call %s:%s: %v", callType, id, err)
+		}
+	}()
 }
 
 func defaultClientOptions() options {
@@ -433,8 +510,11 @@ func WithHealthCheck(interval, timeout time.Duration) Option {
 // own: token supplies the JWT for user, exactly as the JS SDK's
 // StreamVideoClient takes a token or token provider.
 //
-// The returned Client is connected: unless WithoutCoordinatorWS is passed, the
-// coordinator websocket is up and delivering events.
+// It returns without waiting for the network: unless WithoutCoordinatorWS is
+// passed, the coordinator websocket connects in the background, and each joined
+// call's events are delivered once it is up. A join does not wait for it, except
+// the first join of a user the coordinator has never seen, which only the
+// websocket's connect creates.
 func NewClient(apiKey string, user User, token TokenProvider, opts ...Option) (*Client, error) {
 	if apiKey == "" {
 		return nil, xerr.Error("api key is required")
@@ -453,7 +533,7 @@ func NewClient(apiKey string, user User, token TokenProvider, opts ...Option) (*
 // NewRTCClient is the server-side constructor, for bots, tests and
 // ingress/egress-style workloads. It builds a getstream-go Stream from the API
 // secret, mints a token for the WithUser user (User{ID: "agent", Name: "Agent"}
-// by default) and returns a connected Client. The Stream stays reachable
+// by default) and returns a Client, connecting as NewClient does. The Stream stays reachable
 // through Server.
 //
 // opts may mix this package's Option values with getstream.ClientOption values,
@@ -539,11 +619,13 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 		return nil, err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), o.connectTimeout)
-	defer cancel()
-
 	o.logger.Info("user", userID)
 
+	c.ConnectionID.Store("")
+	c.OwnUser.Store(&models.OwnUserResponse{})
+	c.CoordinatorClientInterface = cc
+	c.token.Store(tok)
+	c.wsReady = make(chan struct{})
 	if o.withCoordinatorWS {
 		auth := models.WSAuthMessage{
 			UserDetails: models.ConnectUserDetailsRequest{
@@ -552,49 +634,12 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 			},
 			Token: tok,
 		}
-		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, auth)
-		rec := jointrace.NewRecorder(time.Now())
-		dialCtx := jointrace.WithStep(ctx, rec, jointrace.CoordWSDial, jointrace.PeerCoordinator)
-		start := time.Now()
-		resp, err := connectWsWithRetries(dialCtx, cc, &auth)
-		if err != nil {
-			return nil, err
-		}
-		// The upgrade response is the first byte back; the auth exchange follows it.
-		upgraded := jointrace.FirstByte(dialCtx)
-		if upgraded.IsZero() {
-			upgraded = start
-		}
-		rec.Add(jointrace.Span{
-			Name: jointrace.CoordWSDial, Start: start, End: upgraded,
-			Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
-		})
-		rec.Add(jointrace.Span{
-			Name: jointrace.CoordWSAuth, After: []string{jointrace.CoordWSDial}, Start: upgraded, End: time.Now(),
-			Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
-		})
-		// The coordinator sits behind a load balancer that accepts TCP (and TLS) at an
-		// edge near the client, so the connect time is the round trip to that edge. The
-		// upgrade and the auth exchange are answered by the coordinator itself: the
-		// faster of the two is the round trip every coordinator request pays, plus the
-		// little server time neither can shed.
-		rtt := time.Duration(0)
-		for _, name := range []string{jointrace.CoordWSDial + jointrace.DetailFirstByte, jointrace.CoordWSAuth} {
-			if s, ok := rec.Get(name); ok && s.Duration() > 0 && (rtt == 0 || s.Duration() < rtt) {
-				rtt = s.Duration()
-			}
-		}
-		rec.ReplaceRTT(jointrace.PeerCoordinator, rtt)
-		c.connectTrace = rec
-		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
-		c.ConnectionID.Store(resp.ConnectionID)
-		c.OwnUser.Store(&resp.Me)
+		ctx, cancel := context.WithCancel(context.Background())
+		c.wsCancel = cancel
+		go c.connectWS(ctx, &auth)
 	} else {
-		c.ConnectionID.Store("")
-		c.OwnUser.Store(&models.OwnUserResponse{})
+		close(c.wsReady)
 	}
-	c.CoordinatorClientInterface = cc
-	c.token.Store(tok)
 	if o.detectLocation {
 		tr := locationHTTPClient.Transport.(*http.Transport).Clone()
 		httpClient := &http.Client{Transport: tr, Timeout: locationHTTPClient.Timeout}
@@ -605,6 +650,58 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 		c.locationDiscovery = NewCloudFrontDiscovery(o.locationHintURL, 3, httpClient, c.logger)
 	}
 	return c, nil
+}
+
+// connectWS connects the coordinator websocket, within the connect timeout, and
+// records its dial and auth as spans of their own that no join step waits for.
+func (c *Client) connectWS(ctx context.Context, auth *models.WSAuthMessage) {
+	defer close(c.wsReady)
+	ctx, cancel := context.WithTimeout(ctx, c.connectTimeout)
+	defer cancel()
+
+	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, *auth)
+	rec := jointrace.NewRecorder(time.Now())
+	dialCtx := jointrace.WithStep(ctx, rec, jointrace.CoordWSDial, jointrace.PeerCoordinator)
+	start := time.Now()
+	resp, err := connectWsWithRetries(dialCtx, c.CoordinatorClientInterface, auth)
+	if err != nil {
+		c.logger.Error("coordinator websocket did not connect: no coordinator events", err)
+		return
+	}
+	if ctx.Err() != nil {
+		// Closed while the auth reply was in flight.
+		_ = c.CoordinatorClientInterface.Close()
+		return
+	}
+	// The upgrade response is the first byte back; the auth exchange follows it.
+	upgraded := jointrace.FirstByte(dialCtx)
+	if upgraded.IsZero() {
+		upgraded = start
+	}
+	rec.Add(jointrace.Span{
+		Name: jointrace.CoordWSDial, Start: start, End: upgraded,
+		Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
+	})
+	rec.Add(jointrace.Span{
+		Name: jointrace.CoordWSAuth, After: []string{jointrace.CoordWSDial}, Start: upgraded, End: time.Now(),
+		Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
+	})
+	// The coordinator sits behind a load balancer that accepts TCP (and TLS) at an
+	// edge near the client, so the connect time is the round trip to that edge. The
+	// upgrade and the auth exchange are answered by the coordinator itself: the
+	// faster of the two is the round trip every coordinator request pays, plus the
+	// little server time neither can shed.
+	rtt := time.Duration(0)
+	for _, name := range []string{jointrace.CoordWSDial + jointrace.DetailFirstByte, jointrace.CoordWSAuth} {
+		if s, ok := rec.Get(name); ok && s.Duration() > 0 && (rtt == 0 || s.Duration() < rtt) {
+			rtt = s.Duration()
+		}
+	}
+	rec.ReplaceRTT(jointrace.PeerCoordinator, rtt)
+	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
+	c.OwnUser.Store(&resp.Me)
+	c.ConnectionID.Store(resp.ConnectionID)
+	c.connected(rec)
 }
 
 // Server returns the embedded server-side SDK, or nil when the Client was built
@@ -678,8 +775,7 @@ func (c *Client) detectLocationCached(ctx context.Context, rec *jointrace.Record
 		start := time.Now()
 		loc := c.locationDiscovery.Discover(jointrace.WithStep(ctx, rec, jointrace.LocationHint, jointrace.PeerCloudFront))
 		rec.Add(jointrace.Span{
-			Name: jointrace.LocationHint, After: afterFirst(rec, jointrace.CoordWSAuth),
-			Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCloudFront,
+			Name: jointrace.LocationHint, Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCloudFront,
 		})
 		c.locationCache.Store(loc)
 		c.logger.Infof("%q location discovered", loc)
@@ -694,6 +790,7 @@ func (c *Client) connectWithRetries(
 ) (*models.JoinCallResponse, error) {
 	backoff := 100 * time.Millisecond
 	var lastError error
+	waitedForUser := false
 
 	for {
 		select {
@@ -705,15 +802,21 @@ func (c *Client) connectWithRetries(
 		default:
 		}
 
-		connId := c.ConnectionID.Load()
 		c.Tracing.Load().Emit(rtcstats.CoordinatorJoinCallEvent, joinCallRequest)
-		result, err := c.CoordinatorClientInterface.JoinCall(ctx, _type, id, joinCallRequest, &connId)
+		result, err := c.CoordinatorClientInterface.JoinCall(ctx, _type, id, joinCallRequest)
 		if err == nil {
 			c.Tracing.Load().Emit(rtcstats.CoordinatorJoinCallResponseEvent, result)
 			return &result, nil
 		}
 
 		lastError = err
+		if !waitedForUser && coordinator.IsUnknownUser(err) {
+			// Only the websocket's connect creates the user: a first-ever join waits for it.
+			waitedForUser = true
+			if c.awaitWS(ctx) {
+				continue
+			}
+		}
 		if !coordinator.IsRetryableError(err) {
 			return nil, xerr.Wrap(err)
 		}
@@ -794,7 +897,7 @@ func (c *Client) joinCoordinator(
 		note = "reused connection"
 	}
 	rec.Add(jointrace.Span{
-		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.LocationHint, jointrace.CoordWSAuth),
+		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.LocationHint),
 		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
 	})
 	c.shareRTTs(rec)

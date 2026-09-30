@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -93,10 +94,9 @@ func TestJoinCallRequestPath(t *testing.T) {
 
 	client := newTestClient(t, coordinator.ApiURL(srv.URL))
 
-	connectionID := "connection-1"
 	resp, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{
 		Location: "AMS",
-	}, &connectionID)
+	})
 	require.NoError(t, err)
 
 	require.Equal(t, http.MethodPost, got.method)
@@ -105,8 +105,7 @@ func TestJoinCallRequestPath(t *testing.T) {
 		"api_key":          "api-key",
 		"user_id":          "thierry",
 		"stream-auth-type": "jwt",
-		"connection_id":    "connection-1",
-	}, got.query)
+	}, got.query, "no connection_id: the join does not wait for the websocket")
 	// The coordinator wants the raw JWT, not a Bearer-prefixed one.
 	require.Equal(t, "jwt-token", got.auth)
 	require.Equal(t, "AMS", got.body.Location)
@@ -137,7 +136,7 @@ func TestJoinCallCarriesTheJoinQuery(t *testing.T) {
 
 	client := newTestClient(t, coordinator.ApiURL(srv.URL),
 		coordinator.WithJoinQuery(map[string][]string{"sfu_id": {"sfu-2"}}))
-	_, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{}, nil)
+	_, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{})
 	require.NoError(t, err)
 
 	q := <-queries
@@ -161,10 +160,49 @@ func TestJoinCallReportsARefusalAsFinal(t *testing.T) {
 	client := newTestClient(t, coordinator.ApiURL(srv.URL))
 	_, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{
 		Location: "AMS",
-	}, nil)
+	})
 
 	require.ErrorContains(t, err, "the user thierry does not exist")
 	require.False(t, coordinator.IsRetryableError(err))
+	require.True(t, coordinator.IsUnknownUser(err), "what the websocket's connect cures")
+}
+
+func TestIsUnknownUserIsOnlyTheUser(t *testing.T) {
+	t.Parallel()
+
+	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(16, "Can't find call with id default:x", false)))
+	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(17, "the user thierry does not exist", false)))
+	require.False(t, coordinator.IsUnknownUser(io.EOF))
+}
+
+// WatchCall is GetCall with the websocket's connection id: what subscribes the
+// connection to the call's events.
+func TestWatchCallRequestPath(t *testing.T) {
+	t.Parallel()
+
+	type capture struct {
+		method, path string
+		query        url.Values
+		body         []byte
+	}
+	requests := make(chan capture, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		requests <- capture{method: r.Method, path: r.URL.Path, query: r.URL.Query(), body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"call": {"id": "the-call"}, "members": []}`)
+	}))
+	defer srv.Close()
+
+	client := newTestClient(t, coordinator.ApiURL(srv.URL))
+	require.NoError(t, client.WatchCall(context.Background(), "default", "the-call", "connection-1"))
+
+	got := <-requests
+	require.Equal(t, http.MethodGet, got.method)
+	require.Equal(t, "/api/v2/video/call/default/the-call", got.path)
+	require.Equal(t, "connection-1", got.query.Get("connection_id"))
+	require.Equal(t, "0", got.query.Get("members_limit"))
+	require.Empty(t, got.body)
 }
 
 // A body the models cannot read reads no better on a second attempt.
@@ -181,7 +219,7 @@ func TestJoinCallReportsAnUndecodableBodyAsFinal(t *testing.T) {
 	client := newTestClient(t, coordinator.ApiURL(srv.URL))
 	_, err := client.JoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{
 		Location: "AMS",
-	}, nil)
+	})
 
 	require.ErrorContains(t, err, "decode response")
 	require.False(t, coordinator.IsRetryableError(err))

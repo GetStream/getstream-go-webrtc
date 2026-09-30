@@ -50,8 +50,8 @@ func (c *clients) close() {
 	c.alice, c.bob = nil, nil
 }
 
-// newClient connects user to the coordinator: the websocket dial and auth that a cold
-// join's trace starts with.
+// newClient builds user's client. Its coordinator websocket connects in the background,
+// alongside the first join, whose trace records it off the join's path.
 func (b *bench) newClient(user string) (*rtc.Client, error) {
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{"user_id": user}).
 		SignedString([]byte(b.cfg.APISecret))
@@ -81,9 +81,6 @@ func (b *bench) newClient(user string) (*rtc.Client, error) {
 	c, err := rtc.NewClient(b.cfg.APIKey, rtc.User{ID: user, Name: user}, rtc.StaticToken(token), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("connect %s to the coordinator: %w", user, err)
-	}
-	if !b.cfg.Watch {
-		c.ConnectionID.Store("")
 	}
 	return c, nil
 }
@@ -221,7 +218,6 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		CallID:    "joinbench-" + uuid.NewString()[:8],
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
 		InjectedRTTMs: ms(b.cfg.RTT),
-		NoWatch:       !b.cfg.Watch,
 	}
 	if err := b.scenario(ctx, mode, scenario, cl, &r); err != nil {
 		r.Error = err.Error()
