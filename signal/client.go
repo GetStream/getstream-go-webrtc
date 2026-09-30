@@ -52,9 +52,19 @@ type options struct {
 	healthCheckTimeout  time.Duration
 	readTimeout         time.Duration
 
-	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
-	tlsConfig *tls.Config
-	transport http.RoundTripper
+	dial         func(ctx context.Context, network, addr string) (net.Conn, error)
+	tlsConfig    *tls.Config
+	rpcTransport http.RoundTripper
+	transport    http.RoundTripper
+}
+
+// WithRPCTransport sends the RPCs through rt, which may be shared with other clients so
+// a later call to the same SFU reuses an open connection. WithTLSConfig overrides it:
+// the RPCs then get a transport of their own.
+func WithRPCTransport(rt http.RoundTripper) Option {
+	return func(o *options) {
+		o.rpcTransport = rt
+	}
 }
 
 // WithTLSConfig sets the TLS configuration of the websocket and the RPC connections, so a
@@ -219,7 +229,10 @@ func NewClient(cred models.Credentials, handler Handler, opts ...Option) *Client
 		o.logger = logger.Noop{}
 	}
 	o.transport = http.DefaultTransport
-	if o.dial != nil || o.tlsConfig != nil {
+	switch {
+	case o.rpcTransport != nil && o.tlsConfig == nil:
+		o.transport = o.rpcTransport
+	case o.dial != nil || o.tlsConfig != nil:
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		if o.dial != nil {
 			tr.DialContext = o.dial

@@ -310,6 +310,43 @@ type Client struct {
 	// call to join claims them: later joins find the websocket already open.
 	connectTrace   *jointrace.Recorder
 	connectClaimed atomic.Bool
+
+	// knownRTT is the last round-trip time measured to each peer, for a join whose
+	// requests reuse an open connection and so measure none of their own.
+	rttMu    sync.Mutex
+	knownRTT map[jointrace.Peer]time.Duration
+
+	// sfuTransport carries every call's SFU RPCs, so a later call to the same SFU
+	// reuses the connection an earlier one opened.
+	sfuTransport *http.Transport
+}
+
+// Close closes the coordinator connections and any idle SFU connection.
+func (c *Client) Close() error {
+	if c.sfuTransport != nil {
+		c.sfuTransport.CloseIdleConnections()
+	}
+	return c.CoordinatorClientInterface.Close()
+}
+
+// shareRTTs keeps the round trips a join measured for later joins, and gives the join
+// the ones it could not measure because its connection was already open.
+func (c *Client) shareRTTs(rec *jointrace.Recorder) {
+	if rec == nil {
+		return
+	}
+	c.rttMu.Lock()
+	defer c.rttMu.Unlock()
+	if c.knownRTT == nil {
+		c.knownRTT = make(map[jointrace.Peer]time.Duration, 2)
+	}
+	for _, peer := range []jointrace.Peer{jointrace.PeerCoordinator, jointrace.PeerCloudFront} {
+		if rtt := rec.RTT(peer); rtt > 0 {
+			c.knownRTT[peer] = rtt
+		} else {
+			rec.SetRTT(peer, c.knownRTT[peer])
+		}
+	}
 }
 
 // claimConnectTrace copies the client's own connection spans into the first join's trace.
@@ -474,10 +511,14 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	}
 
 	c := &Client{
-		User:    user,
-		UserID:  userID,
-		apiKey:  apiKey,
-		options: o,
+		User:         user,
+		UserID:       userID,
+		apiKey:       apiKey,
+		options:      o,
+		sfuTransport: http.DefaultTransport.(*http.Transport).Clone(),
+	}
+	if o.networkDelay > 0 {
+		c.sfuTransport.DialContext = netdelay.Dialer(o.networkDelay, nil)
 	}
 	// This will be the general Tracer for the SDK client, unrelated to connections and PCs
 	if c.StatsReportingInterval() > 0 {
@@ -532,6 +573,18 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 			Name: jointrace.CoordWSAuth, After: []string{jointrace.CoordWSDial}, Start: upgraded, End: time.Now(),
 			Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator,
 		})
+		// The coordinator sits behind a load balancer that accepts TCP (and TLS) at an
+		// edge near the client, so the connect time is the round trip to that edge. The
+		// upgrade and the auth exchange are answered by the coordinator itself: the
+		// faster of the two is the round trip every coordinator request pays, plus the
+		// little server time neither can shed.
+		rtt := time.Duration(0)
+		for _, name := range []string{jointrace.CoordWSDial + jointrace.DetailFirstByte, jointrace.CoordWSAuth} {
+			if s, ok := rec.Get(name); ok && s.Duration() > 0 && (rtt == 0 || s.Duration() < rtt) {
+				rtt = s.Duration()
+			}
+		}
+		rec.ReplaceRTT(jointrace.PeerCoordinator, rtt)
 		c.connectTrace = rec
 		c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
 		c.ConnectionID.Store(resp.ConnectionID)
@@ -543,11 +596,11 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	c.CoordinatorClientInterface = cc
 	c.token.Store(tok)
 	if o.detectLocation {
-		httpClient := locationHTTPClient
+		tr := locationHTTPClient.Transport.(*http.Transport).Clone()
+		httpClient := &http.Client{Transport: tr, Timeout: locationHTTPClient.Timeout}
 		if o.networkDelay > 0 {
-			tr := locationHTTPClient.Transport.(*http.Transport).Clone()
 			tr.DialContext = netdelay.Dialer(o.networkDelay, tr.DialContext)
-			httpClient = &http.Client{Transport: tr, Timeout: locationHTTPClient.Timeout + 3*o.networkDelay}
+			httpClient.Timeout += 3 * o.networkDelay
 		}
 		c.locationDiscovery = NewCloudFrontDiscovery(o.locationHintURL, 3, httpClient, c.logger)
 	}
@@ -744,6 +797,7 @@ func (c *Client) joinCoordinator(
 		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.LocationHint, jointrace.CoordWSAuth),
 		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
 	})
+	c.shareRTTs(rec)
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectedEvent, result)
 
 	getCred := func(forceReload bool, excludeSFUID string) (models.Credentials, error) {

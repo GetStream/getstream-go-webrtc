@@ -1087,6 +1087,9 @@ func (c *Call) signalOptions() []signal.Option {
 	if c.cc.networkDelay > 0 {
 		opts = append(opts, signal.WithDialContext(netdelay.Dialer(c.cc.networkDelay, nil)))
 	}
+	if c.cc.sfuTransport != nil {
+		opts = append(opts, signal.WithRPCTransport(c.cc.sfuTransport))
+	}
 	return opts
 }
 

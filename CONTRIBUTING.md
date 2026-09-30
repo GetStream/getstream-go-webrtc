@@ -58,6 +58,7 @@ The module builds with `CGO_ENABLED=0`.
 | `interceptor/` | RTX prober for the SFU's RTX SSRC mapping. |
 | `logger/` | `ILogger` interface, `Noop` default, logrus adapter, pion `LeveledLogger` bridge. |
 | `internal/` | Internal helpers, `FakeSFU`, the `cmd/genwsevent` generator, and `readmecheck`. |
+| `cmd/joinbench/` | Join latency bench: `Call.Join` to audio both ways against a coordinator and SFU, cold and warm, as a join DAG in round trips. Needs a live app (`-env local` or `staging`); `go doc ./cmd/joinbench`. |
 
 ```bash
 go doc .                    # Client, Call, Option, JoinOption, the event helpers

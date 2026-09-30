@@ -46,6 +46,7 @@ type options struct {
 	logger        logger.ILogger
 	enableWs      bool
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
+	joinQuery     url.Values
 }
 
 var defaultOptions = options{
@@ -92,6 +93,14 @@ func WithDialContext(dial func(ctx context.Context, network, addr string) (net.C
 	}
 }
 
+// WithJoinQuery adds q to the query string of every join request. The coordinator
+// reads SFU pinning from there: sfu_id picks one SFU, pin_to_tag one SFU tag.
+func WithJoinQuery(q url.Values) Option {
+	return func(o *options) {
+		o.joinQuery = q
+	}
+}
+
 // WithLogger sets the logger. Without it the client logs nothing.
 func WithLogger(l logger.ILogger) Option {
 	return func(o *options) {
@@ -133,6 +142,7 @@ type Client struct {
 	interceptor *event.Store[models.WebsocketEvent]
 	handler     Handler
 	httpClient  *http.Client
+	transport   *http.Transport
 }
 
 var _ CoordinatorClientInterface = (*Client)(nil)
@@ -175,15 +185,15 @@ func NewClient(apiKey, userID string, tokenProvider TokenProvider, handler Handl
 		c.wsclient = newWsClient(u.String(), c)
 	}
 
-	var transport http.RoundTripper = http.DefaultTransport
+	// A transport of its own: a new client starts cold, and its joins reuse only the
+	// connections it opened itself.
+	c.transport = http.DefaultTransport.(*http.Transport).Clone()
 	if o.dial != nil {
-		tr := http.DefaultTransport.(*http.Transport).Clone()
-		tr.DialContext = o.dial
-		transport = tr
+		c.transport.DialContext = o.dial
 	}
 	c.httpClient = &http.Client{
 		Timeout:   5 * time.Second,
-		Transport: rtretry.NewRoundTripperRetryer(transport),
+		Transport: rtretry.NewRoundTripperRetryer(c.transport),
 	}
 	return c, nil
 }
@@ -198,18 +208,21 @@ func (c *Client) JoinCall(
 	connectionID *string,
 ) (models.JoinCallResponse, error) {
 	var response models.JoinCallResponse
+	query := map[string]any{"connection_id": connectionID}
+	for k := range c.joinQuery {
+		query[k] = c.joinQuery.Get(k)
+	}
 	err := c.makeRequest(ctx, http.MethodPost, "/api/v2/video/call/{type}/{id}/join",
 		map[string]any{
 			"type": _type,
 			"id":   id,
 		},
-		map[string]any{
-			"connection_id": connectionID,
-		}, joinCallRequest, &response)
+		query, joinCallRequest, &response)
 	return response, xerr.Wrapf(err, "join call %s:%s", _type, id)
 }
 
 func (c *Client) Close() error {
+	c.transport.CloseIdleConnections()
 	if c.wsclient != nil {
 		return c.wsclient.Close()
 	}
