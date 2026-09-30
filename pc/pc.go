@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/GetStream/protocol/protobuf/video/sfu/models"
-	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
-	"github.com/pion/dtls/v3/pkg/protocol/handshake"
+	"github.com/pion/dtls/v4/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v4/pkg/protocol"
+	"github.com/pion/dtls/v4/pkg/protocol/handshake"
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
@@ -230,6 +231,13 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	// for, and browsers never send one either.
 	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetICETimeouts(params.iceTimeouts())
+	// Offer the WARP connection setup (draft-uberti-tsvwg-warp) that the SFU negotiates in
+	// band: DTLS 1.3, and DTLS in the ICE checks (SPED). An SFU without them answers as
+	// before, so the connection falls back to DTLS 1.2 after ICE.
+	if err := se.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3); err != nil {
+		return nil, xerr.Wrap(err)
+	}
+	se.EnableSped(true)
 
 	// One line per handshake message we send pins down which direction a
 	// stalled handshake lost.
