@@ -936,6 +936,13 @@ func (t *Transport) Timing() Timing {
 // SelectedPairRTT is the round-trip time ICE measured on the selected candidate pair, or
 // zero before it has one.
 func (t *Transport) SelectedPairRTT() time.Duration {
+	// pion reads the ICE transport's gatherer without its lock, while ICETransport.Start
+	// sets it. With SPED, Start runs inside the DTLS start, concurrently with callers here,
+	// so wait until ICE has connected, which happens after Start.
+	switch t.PC.ICEConnectionState() {
+	case webrtc.ICEConnectionStateNew, webrtc.ICEConnectionStateChecking:
+		return 0
+	}
 	dtls := dtlsTransportOf(t.PC)
 	if dtls == nil || dtls.ICETransport() == nil {
 		return 0

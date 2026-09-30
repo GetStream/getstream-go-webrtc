@@ -16,7 +16,7 @@ import (
 // TestWARPNegotiation connects a publisher transport, which offers, to a pion peer
 // configured like an SFU. A WARP SFU (DTLS 1.2 to 1.3, SPED, the DTLS server role when
 // the offer has SPED) gets DTLS 1.3 and SPED; an SFU without WARP gets DTLS 1.2 without
-// SPED, as before.
+// SPED, as before. The selected pair's RTT is read throughout, as the join trace does.
 func TestWARPNegotiation(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
@@ -43,6 +43,21 @@ func TestWARPNegotiation(t *testing.T) {
 			}
 			remote := newRemotePeerWithConfig(t, st.tr, sfu)
 			st.handler.onICECandidateSender = remote.ICECandidateSender
+
+			done := make(chan struct{})
+			polled := make(chan struct{})
+			go func() {
+				defer close(polled)
+				for {
+					select {
+					case <-done:
+						return
+					default:
+						_ = st.tr.SelectedPairRTT()
+					}
+				}
+			}()
+			defer func() { close(done); <-polled }()
 
 			st.tr.Negotiate(true)
 			st.tr.HandleRemoteDescription(remote.Answer(st.waitForOffer()))
