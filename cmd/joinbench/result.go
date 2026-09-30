@@ -53,8 +53,8 @@ type runResult struct {
 // toMedia is a time to media, from Call.Join (README "How we count").
 type toMedia struct {
 	Ms float64 `json:"ms"`
-	// RTTs is Ms over the reference round trip: the mean of RTT_c and RTT_s, which the
-	// goal assumes equal. Timers and local work count too: it is wall time.
+	// RTTs is Ms in round trips to the SFU, which the goal assumes equal to RTT_c.
+	// Timers and local work count too: it is wall time.
 	RTTs float64 `json:"rtts"`
 	// NetRTTs are the network round trips on the path from Join to the first packet,
 	// each in its own peer's RTT (half a round trip in flight for publish); TimerMs,
@@ -73,17 +73,14 @@ type roleTrace struct {
 	Trace jointrace.Report `json:"trace"`
 }
 
-// refRTT is the round trip time to media is counted in.
+// refRTT is the round trip time to media is counted in: RTT_s, a clean TCP connect to
+// the SFU. RTT_c is taken from the coordinator's websocket exchanges, which carry some
+// server time and, on a warm client, date from its first connect.
 func refRTT(t jointrace.Trace) time.Duration {
-	c, s := t.RTT[jointrace.PeerCoordinator], t.RTT[jointrace.PeerSFU]
-	switch {
-	case c > 0 && s > 0:
-		return (c + s) / 2
-	case s > 0:
+	if s := t.RTT[jointrace.PeerSFU]; s > 0 {
 		return s
-	default:
-		return c
 	}
+	return t.RTT[jointrace.PeerCoordinator]
 }
 
 // timeToMedia is the publish (or subscribe) time to media of t, or nil when the first

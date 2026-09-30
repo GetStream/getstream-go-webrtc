@@ -86,15 +86,15 @@ func TestTimeToMediaCountsFromJoin(t *testing.T) {
 	require.Nil(t, timeToMedia(tr, true), "not reached")
 }
 
-func TestRefRTTIsTheMeanOfCoordinatorAndSFU(t *testing.T) {
+func TestRefRTTIsTheSFURoundTrip(t *testing.T) {
 	t.Parallel()
 
 	tr := jointrace.Trace{RTT: map[jointrace.Peer]time.Duration{
-		jointrace.PeerCoordinator: 80 * time.Millisecond, jointrace.PeerSFU: 120 * time.Millisecond,
+		jointrace.PeerCoordinator: 210 * time.Millisecond, jointrace.PeerSFU: 110 * time.Millisecond,
 	}}
-	require.Equal(t, 100*time.Millisecond, refRTT(tr))
+	require.Equal(t, 110*time.Millisecond, refRTT(tr))
 	delete(tr.RTT, jointrace.PeerSFU)
-	require.Equal(t, 80*time.Millisecond, refRTT(tr), "whichever is known")
+	require.Equal(t, 210*time.Millisecond, refRTT(tr), "the coordinator's when the SFU's is unknown")
 }
 
 func runWith(mode string, run int, tr jointrace.Trace) runResult {
