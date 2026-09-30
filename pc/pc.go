@@ -238,6 +238,11 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 		return nil, xerr.Wrap(err)
 	}
 	se.EnableSped(true)
+	// On the subscriber, which the ICE-lite SFU offers, pion would answer passive and make
+	// the SFU the DTLS client, whose ClientHello can only ride our checks' responses, one
+	// datagram each. Answering active to an offer with SPED puts our one-datagram ClientHello
+	// in our first check, as browsers do.
+	se.SetAnsweringDTLSRoleWithSPED(webrtc.DTLSRoleClient)
 
 	// One line per handshake message we send pins down which direction a
 	// stalled handshake lost.
