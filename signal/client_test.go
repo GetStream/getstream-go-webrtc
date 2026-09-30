@@ -3,6 +3,10 @@ package signal_test
 import (
 	"context"
 	"errors"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -559,4 +563,35 @@ func requireWebsocketClosed(t *testing.T, sfu *testutil.FakeSFU) {
 	case <-time.After(awaitTimeout):
 		t.Fatal("the websocket was abandoned without being closed")
 	}
+}
+
+func TestRPCTransportIsSharedBetweenClients(t *testing.T) {
+	t.Parallel()
+
+	var conns atomic.Int32
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/protobuf")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	cred := models.Credentials{Token: sfuToken, Server: models.SFUResponse{URL: srv.URL + "/twirp"}}
+	shared := http.DefaultTransport.(*http.Transport).Clone()
+	t.Cleanup(shared.CloseIdleConnections)
+	for range 2 {
+		c := signal.NewClient(cred, signal.NoOpHandler{}, signal.WithRPCTransport(shared))
+		_, err := c.SendAnswer(context.Background(), &signal_rpc.SendAnswerRequest{})
+		require.NoError(t, err)
+	}
+	require.Equal(t, int32(1), conns.Load(), "the second client reuses the first one's connection")
+
+	c := signal.NewClient(cred, signal.NoOpHandler{})
+	_, err := c.SendAnswer(context.Background(), &signal_rpc.SendAnswerRequest{})
+	require.NoError(t, err)
+	require.Equal(t, int32(2), conns.Load(), "a client without it opens its own")
 }

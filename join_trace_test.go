@@ -2,6 +2,9 @@ package rtc
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
 
+	"github.com/GetStream/getstream-go-webrtc/coordinator"
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
 	"github.com/GetStream/getstream-go-webrtc/jointrace"
@@ -257,4 +261,58 @@ func TestJoinTraceIgnoresRepairsAfterTheFirstJoin(t *testing.T) {
 	first.Add(jointrace.Span{Name: jointrace.SFUJoin, Start: time.Now(), End: time.Now()})
 	require.False(t, first.Has(jointrace.SFUJoin), "and the trace is sealed")
 	j.timer.Stop()
+}
+
+// TestJoinTraceOfASecondJoinOnTheSameClient is the warm join: the client's coordinator
+// connection is already open, so the second call's trace starts at its Join, its
+// coordinator request pays one round trip, and that round trip is counted in the RTT
+// the client measured on its first join.
+func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
+	t.Parallel()
+
+	const rtt = 50 * time.Millisecond
+	const userID = "warm-user"
+	sfu := testutil.NewFakeSFU()
+	t.Cleanup(sfu.Close)
+	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", userID, time.Hour)
+	require.NoError(t, err)
+	coord := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(sfu, "sfu-fake", token.Token)})
+	}))
+	t.Cleanup(coord.Close)
+
+	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
+		WithCoordinatorOptions(coordinator.ApiURL(coord.URL)),
+		WithoutCoordinatorWS(), WithoutLocationDiscovery(), WithNetworkDelay(rtt))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	join := func(id string) jointrace.Trace {
+		t.Helper()
+		call := client.Call(testutil.DefaultCallType, id)
+		call.onceConnect.Do(func() {})
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := call.Join(ctx)
+		require.NoError(t, err)
+		trace := call.JoinTrace()
+		require.NoError(t, call.Leave("test over"))
+		return trace
+	}
+	first, second := join("cold-call"), join("warm-call")
+
+	_, dialed := first.Span(jointrace.CoordJoin + jointrace.DetailTCP)
+	require.True(t, dialed, "the first join opens the coordinator connection")
+	require.InDelta(t, float64(rtt), float64(first.RTT[jointrace.PeerCoordinator]), float64(rtt)/10)
+
+	require.Equal(t, second.JoinAt, second.Origin, "the second trace starts at its own Join")
+	_, dialed = second.Span(jointrace.CoordJoin + jointrace.DetailTCP)
+	require.False(t, dialed, "the second join reuses the connection")
+	require.Equal(t, first.RTT[jointrace.PeerCoordinator], second.RTT[jointrace.PeerCoordinator])
+	join2, ok := second.Span(jointrace.CoordJoin)
+	require.True(t, ok)
+	require.InDelta(t, 1, second.RTTs(jointrace.PeerCoordinator, join2.Duration()), 0.1)
+	_, ok = second.Span(jointrace.SFUJoin)
+	require.True(t, ok, "and records the SFU side")
 }
