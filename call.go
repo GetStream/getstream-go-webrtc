@@ -274,6 +274,8 @@ type Call struct {
 
 	joinOptions      []JoinOption
 	coordinatorState atomic.Pointer[CallState]
+	// timing records the first join's steps; see ConnectionTiming.
+	timing connectionTimer
 
 	GetCred GetCredentialsFunc
 	cred    atomic.Pointer[models.Credentials]
@@ -400,10 +402,12 @@ func (c *Call) joinCoordinator(ctx context.Context, options joinOptions) error {
 		return nil
 	}
 
+	c.timing.update(func(t *ConnectionTiming) { stamp(&t.CoordinatorStarted, time.Now()) })
 	result, getCred, err := c.cc.joinCoordinator(ctx, c.Type, c.Id, options.coordinatorRequest())
 	if err != nil {
 		return xerr.Wrap(err)
 	}
+	c.timing.update(func(t *ConnectionTiming) { stamp(&t.CoordinatorDone, time.Now()) })
 	c.GetCred = getCred
 
 	cred := result.Credentials
@@ -804,6 +808,12 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 	for _, o := range opts {
 		o(&options)
 	}
+	if options.reconnectDetails.GetStrategy() == sfu_models.WebsocketReconnectStrategy_WEBSOCKET_RECONNECT_STRATEGY_UNSPECIFIED {
+		c.timing.update(func(t *ConnectionTiming) { stamp(&t.JoinStarted, time.Now()) })
+	} else {
+		// Reconnects re-enter Join; the timing describes the first join only.
+		c.timing.seal()
+	}
 
 	if err := c.joinCoordinator(ctx, options); err != nil {
 		return nil, err
@@ -895,6 +905,12 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 			return nil, xerr.Wrap(err)
 		}
 	}
+	joinedAt := time.Now()
+	dialedAt := c.Client().DialedAt()
+	c.timing.update(func(t *ConnectionTiming) {
+		stamp(&t.SFUConnected, dialedAt)
+		stamp(&t.SFUJoined, joinedAt)
+	})
 	c.store.Store(NewParticipantStore(c, resp.CallState))
 	c.applyJoinResponse(resp)
 
@@ -1148,6 +1164,7 @@ func (c *Call) RawHandler(event *sfu_events.SfuEvent) {
 // REJOIN or a Leave performs, and this runs on the signalling read loop, so a
 // panic here would take the process down with it.
 func (c *Call) OnSubscriberOffer(offer *sfu_events.SfuEvent_SubscriberOffer) {
+	c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.Offer, time.Now()) })
 	sub := c.subscriberPeer()
 	if sub == nil {
 		c.logger.Warn("dropping subscriber offer: no subscriber peer connection")

@@ -19,6 +19,7 @@ import (
 	"github.com/thesyncim/skipset"
 	"github.com/valyala/bytebufferpool"
 
+	sdkinterceptor "github.com/GetStream/getstream-go-webrtc/interceptor"
 	"github.com/GetStream/getstream-go-webrtc/logger"
 	"github.com/GetStream/getstream-go-webrtc/pc"
 	"github.com/GetStream/getstream-go-webrtc/rtcstats"
@@ -123,6 +124,10 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 		c.logger.Warnf("external RTCP is enabled, RTCP reports will not be sent by the SDK")
 	}
 
+	peerConfig.Registry.Add(sdkinterceptor.NewFirstPacketFactory(nil, func(at time.Time) {
+		c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.FirstRTP, at) })
+	}))
+
 	sub.Tracing.Load().Emit(rtcstats.PeerCreateEvent, peerConfig.Config)
 
 	peerc, err := pc.NewPCTransport(pc.TransportParams{
@@ -131,6 +136,9 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 		Handler:    sub,
 		IsOfferer:  false,
 		Transport:  sfu_models.PeerType_PEER_TYPE_SUBSCRIBER,
+		OnTimingChange: func(timing pc.Timing) {
+			c.timing.update(func(t *ConnectionTiming) { stampTransport(&t.Subscriber, timing) })
+		},
 	})
 	sub.c = c
 	sub.Transport = peerc
@@ -275,10 +283,12 @@ func (s *subscriber) OnAnswer(sd webrtc.SessionDescription, negotiationId uint32
 			return xerr.Wrap(err)
 		}
 	}
+	s.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.SignalSent, time.Now()) })
 	answer, err := s.c.Client().SendAnswer(context.Background(), req)
 	if err != nil {
 		return xerr.Wrap(err)
 	}
+	s.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Subscriber.SignalDone, time.Now()) })
 	if err := answer.GetError(); err != nil {
 		return errors.New(err.Message)
 	}

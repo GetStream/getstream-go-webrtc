@@ -95,6 +95,9 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 	// Add RTX prober interceptor to send probe packets that help the SFU
 	// discover RTX SSRC mappings via header extensions (mid, rsid)
 	peerConfig.Registry.Add(sdkinterceptor.NewRTXProberFactory())
+	peerConfig.Registry.Add(sdkinterceptor.NewFirstPacketFactory(func(at time.Time) {
+		c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.FirstRTP, at) })
+	}, nil))
 
 	cred := c.cred.Load()
 	if peerConfig.Config.ICEServers == nil {
@@ -115,6 +118,9 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 		Handler:    pub,
 		IsOfferer:  true,
 		Transport:  sfu_models.PeerType_PEER_TYPE_PUBLISHER_UNSPECIFIED,
+		OnTimingChange: func(timing pc.Timing) {
+			c.timing.update(func(t *ConnectionTiming) { stampTransport(&t.Publisher, timing) })
+		},
 	})
 
 	pub.Transport = peerc
@@ -262,6 +268,7 @@ func (p *publisher) OnTrack(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 }
 
 func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) error {
+	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.Offer, time.Now()) })
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
@@ -277,10 +284,12 @@ func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) 
 		SessionId: p.c.SessionID.Load(),
 		Tracks:    tracks,
 	}
+	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.SignalSent, time.Now()) })
 	resp, err := p.c.Client().SetPublisher(ctx, req)
 	if err != nil {
 		return err
 	}
+	p.c.timing.update(func(t *ConnectionTiming) { stamp(&t.Publisher.SignalDone, time.Now()) })
 	if sfuErr := resp.GetError(); sfuErr != nil {
 		// Return a NegotiationError with SFU error details (code, message)
 		return pc.NewNegotiationError("SetPublisher failed", nil, sfuErr)
