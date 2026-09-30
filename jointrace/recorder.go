@@ -115,6 +115,19 @@ func (r *Recorder) SetRTT(peer Peer, rtt time.Duration) {
 	}
 }
 
+// ReplaceRTT records rtt as the round-trip time to peer, over any recorded before: for
+// a better measurement than the first one.
+func (r *Recorder) ReplaceRTT(peer Peer, rtt time.Duration) {
+	if r == nil || rtt <= 0 {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.sealed {
+		r.rtt[peer] = rtt
+	}
+}
+
 // RTT is the round-trip time recorded for peer, or zero.
 func (r *Recorder) RTT(peer Peer) time.Duration {
 	if r == nil {

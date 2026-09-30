@@ -227,6 +227,7 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		r.Error = err.Error()
 	}
 	r.RTTcMs, r.RTTsMs, r.RTTudpMs = meanRTTs(r.Traces)
+	r.RTTcConnectMs = connectRTT(r.Traces)
 	return r
 }
 
@@ -312,6 +313,18 @@ func meanRTTs(traces []roleTrace) (c, s, udp float64) {
 		return round2(sum / float64(n))
 	}
 	return mean(jointrace.PeerCoordinator), mean(jointrace.PeerSFU), mean(jointrace.PeerUDP)
+}
+
+// connectRTT is the first coordinator TCP connect in the traces, or zero.
+func connectRTT(traces []roleTrace) float64 {
+	for _, t := range traces {
+		for _, s := range t.Trace.Spans {
+			if s.Name == jointrace.CoordWSDial+jointrace.DetailTCP || s.Name == jointrace.CoordJoin+jointrace.DetailTCP {
+				return s.Ms
+			}
+		}
+	}
+	return 0
 }
 
 // runMode runs every scenario of one mode: -runs measured calls each, after one

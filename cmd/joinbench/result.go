@@ -36,6 +36,9 @@ type runResult struct {
 	RTTcMs   float64 `json:"rtt_c_ms"`
 	RTTsMs   float64 `json:"rtt_s_ms"`
 	RTTudpMs float64 `json:"rtt_udp_ms"`
+	// RTTcConnectMs is the coordinator's TCP connect time on a fresh connection: the
+	// round trip to the load balancer's edge, which can be much nearer than RTT_c.
+	RTTcConnectMs float64 `json:"rtt_c_connect_ms,omitempty"`
 
 	Publish   *toMedia `json:"publish,omitempty"`
 	Subscribe *toMedia `json:"subscribe,omitempty"`

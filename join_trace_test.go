@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -12,6 +13,8 @@ import (
 	sfu_events "github.com/GetStream/protocol/protobuf/video/sfu/event"
 	sfu_models "github.com/GetStream/protocol/protobuf/video/sfu/models"
 	"github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
 
@@ -315,4 +318,45 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 	require.InDelta(t, 1, second.RTTs(jointrace.PeerCoordinator, join2.Duration()), 0.1)
 	_, ok = second.Span(jointrace.SFUJoin)
 	require.True(t, ok, "and records the SFU side")
+}
+
+// TestCoordinatorRTTIsTheUpgradeRoundTrip puts the coordinator behind an edge: the TCP
+// connect is answered 10 ms away, the websocket upgrade 100 ms away. Coordinator steps
+// are counted in the upgrade's round trip, the one every request pays.
+func TestCoordinatorRTTIsTheUpgradeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	const edge, backend = 10 * time.Millisecond, 90 * time.Millisecond
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(backend)
+		conn, _, _, err := ws.UpgradeHTTP(r, w)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, err := wsutil.ReadClientText(conn); err != nil {
+			return
+		}
+		_ = wsutil.WriteServerText(conn, []byte(`{"type":"connection.ok","connection_id":"conn-1","me":{"id":"edge-user"}}`))
+		for {
+			if _, _, err := wsutil.ReadClientData(conn); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", "edge-user", time.Hour)
+	require.NoError(t, err)
+	client, err := NewClient(token.APIKey, User{ID: "edge-user"}, StaticToken(token.Token),
+		WithCoordinatorOptions(coordinator.WithWsURL("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v2/connect")),
+		WithoutLocationDiscovery(), WithNetworkDelay(edge))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+
+	trace := client.connectTrace.Trace()
+	tcp, ok := trace.Span(jointrace.CoordWSDial + jointrace.DetailTCP)
+	require.True(t, ok)
+	require.Less(t, tcp.Duration(), 3*edge, "the connect is answered at the edge")
+	require.InDelta(t, float64(edge+backend), float64(trace.RTT[jointrace.PeerCoordinator]), float64(edge+backend)/5)
 }
