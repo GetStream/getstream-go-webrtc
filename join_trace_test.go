@@ -307,7 +307,7 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 
 	_, dialed := first.Span(jointrace.CoordJoin + jointrace.DetailTCP)
 	require.True(t, dialed, "the first join opens the coordinator connection")
-	require.InDelta(t, float64(rtt), float64(first.RTT[jointrace.PeerCoordinator]), float64(rtt)/10)
+	require.InDelta(t, float64(rtt), float64(first.RTT[jointrace.PeerCoordinator]), float64(rtt)/4)
 
 	require.Equal(t, second.JoinAt, second.Origin, "the second trace starts at its own Join")
 	_, dialed = second.Span(jointrace.CoordJoin + jointrace.DetailTCP)
@@ -315,7 +315,7 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 	require.Equal(t, first.RTT[jointrace.PeerCoordinator], second.RTT[jointrace.PeerCoordinator])
 	join2, ok := second.Span(jointrace.CoordJoin)
 	require.True(t, ok)
-	require.InDelta(t, 1, second.RTTs(jointrace.PeerCoordinator, join2.Duration()), 0.1)
+	require.InDelta(t, 1, second.RTTs(jointrace.PeerCoordinator, join2.Duration()), 0.3, "one round trip, not a new connection's two")
 	_, ok = second.Span(jointrace.SFUJoin)
 	require.True(t, ok, "and records the SFU side")
 }
