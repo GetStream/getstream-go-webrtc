@@ -32,13 +32,15 @@ func (e *Error) Error() string {
 const notFound = 16
 
 // IsUnknownUser reports whether err is the coordinator refusing a user it has
-// never seen. Only the websocket's connect creates a user from its token.
+// never seen. Only the websocket's connect creates a user from its token. The
+// coordinator wraps the message as `JoinCall failed with error: "the user X does not exist"`.
 func IsUnknownUser(err error) bool {
 	coordErr := &Error{}
 	if !errors.As(err, &coordErr) || coordErr.Code != notFound {
 		return false
 	}
-	return strings.HasPrefix(coordErr.Message, "the user ") && strings.HasSuffix(coordErr.Message, " does not exist")
+	_, rest, ok := strings.Cut(coordErr.Message, `"the user `)
+	return ok && strings.HasSuffix(rest, ` does not exist"`)
 }
 
 // IsRetryableError reports whether err is worth retrying. Errors the

@@ -90,7 +90,7 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		w.Header().Set("Content-Type", "application/json")
 		if !f.known.Load() {
 			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"code":16,"message":"the user ws-user does not exist","StatusCode":404}`))
+			_, _ = w.Write([]byte(`{"code":16,"message":"JoinCall failed with error: \"the user ws-user does not exist\"","StatusCode":404}`))
 			return
 		}
 		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(f.sfu, "sfu-fake", token.Token)})

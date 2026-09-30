@@ -152,7 +152,7 @@ func TestJoinCallReportsARefusalAsFinal(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
-		_, err := io.WriteString(w, `{"code": 16, "message": "the user thierry does not exist", "StatusCode": 404}`)
+		_, err := io.WriteString(w, `{"code": 16, "message": "JoinCall failed with error: \"the user thierry does not exist\"", "StatusCode": 404}`)
 		require.NoError(t, err)
 	}))
 	defer srv.Close()
@@ -170,8 +170,8 @@ func TestJoinCallReportsARefusalAsFinal(t *testing.T) {
 func TestIsUnknownUserIsOnlyTheUser(t *testing.T) {
 	t.Parallel()
 
-	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(16, "Can't find call with id default:x", false)))
-	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(17, "the user thierry does not exist", false)))
+	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(16, `GetCall failed with error: "Can't find call with id default:x"`, false)))
+	require.False(t, coordinator.IsUnknownUser(coordinator.NewError(17, `JoinCall failed with error: "the user thierry does not exist"`, false)))
 	require.False(t, coordinator.IsUnknownUser(io.EOF))
 }
 
