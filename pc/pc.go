@@ -85,11 +85,13 @@ type Transport struct {
 	dtlsConnectedAt time.Time
 	connectedAt     time.Time
 	// negotiationRequestedAt, offerStartedAt and firstRemoteCandidateAt are the first
-	// Negotiate call, the first offer being created and the first trickled candidate.
-	negotiationRequestedAt time.Time
-	offerStartedAt         time.Time
-	firstRemoteCandidateAt time.Time
-	lastPCState            webrtc.PeerConnectionState
+	// Negotiate call, the first offer being created and the first remote candidate,
+	// trickled or, when remoteCandidatesInDescription, in a remote description.
+	negotiationRequestedAt        time.Time
+	offerStartedAt                time.Time
+	firstRemoteCandidateAt        time.Time
+	remoteCandidatesInDescription bool
+	lastPCState                   webrtc.PeerConnectionState
 	// lastICEState and lastDTLSState skip the Closed transition that Close
 	// causes, so a snapshot taken afterwards still shows where the connection
 	// stalled.
@@ -145,8 +147,10 @@ type Timing struct {
 	// offer began to be created, after the debounce.
 	NegotiationRequested time.Time
 	OfferStarted         time.Time
-	// FirstRemoteCandidate is when the first candidate trickled by the SFU arrived.
-	FirstRemoteCandidate time.Time
+	// FirstRemoteCandidate is when the SFU's first candidate arrived: trickled, or in its
+	// offer or answer when RemoteCandidatesInDescription.
+	FirstRemoteCandidate          time.Time
+	RemoteCandidatesInDescription bool
 	// ICEChecking is when ICE started checking candidate pairs.
 	ICEChecking time.Time
 	// ICEConnected is when ICE found a working pair.
@@ -758,6 +762,18 @@ func (t *Transport) setRemoteDescription(sd webrtc.SessionDescription) error {
 		t.Params.Logger.Warnw("a track does not support the negotiated codec", err)
 	}
 	t.Params.Handler.OnSetRemoteDescriptionSuccess()
+	if strings.Contains(sd.SDP, "a=candidate:") {
+		t.mu.Lock()
+		first := t.firstRemoteCandidateAt.IsZero()
+		if first {
+			t.firstRemoteCandidateAt = time.Now()
+			t.remoteCandidatesInDescription = true
+		}
+		t.mu.Unlock()
+		if first {
+			t.notifyTiming()
+		}
+	}
 
 	t.remoteUfrag = ""
 	if credential, err := iceCredentialOf(sd); err == nil {
@@ -934,13 +950,14 @@ func (t *Transport) Timing() Timing {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return Timing{
-		NegotiationRequested: t.negotiationRequestedAt,
-		OfferStarted:         t.offerStartedAt,
-		FirstRemoteCandidate: t.firstRemoteCandidateAt,
-		ICEChecking:          t.iceStartedAt,
-		ICEConnected:         t.iceConnectedAt,
-		DTLSConnected:        t.dtlsConnectedAt,
-		Connected:            t.connectedAt,
+		NegotiationRequested:          t.negotiationRequestedAt,
+		OfferStarted:                  t.offerStartedAt,
+		FirstRemoteCandidate:          t.firstRemoteCandidateAt,
+		RemoteCandidatesInDescription: t.remoteCandidatesInDescription,
+		ICEChecking:                   t.iceStartedAt,
+		ICEConnected:                  t.iceConnectedAt,
+		DTLSConnected:                 t.dtlsConnectedAt,
+		Connected:                     t.connectedAt,
 	}
 }
 

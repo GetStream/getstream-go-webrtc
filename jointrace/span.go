@@ -58,9 +58,9 @@ const (
 )
 
 // The steps of the fast join path. It shares pcs.create, sfu.ws.dial, pub.sfu.candidates,
-// the ICE, DTLS and RTP steps and sub.sendanswer with the legacy path; until the SFU puts
-// its candidates in the SDPs they arrive on the websocket, which is why sfu.ws and the
-// *.sfu.candidates steps are still there.
+// the ICE, DTLS and RTP steps and sub.sendanswer with the legacy path. The *.sfu.candidates
+// steps appear only when the SFU trickles its candidates on the websocket instead of putting
+// them in the FastJoin SDPs; then ICE waits for sfu.ws.
 const (
 	CoordFastJoin    = "coord.fastjoin"
 	SFUFastJoin      = "sfu.fastjoin"

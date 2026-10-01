@@ -261,6 +261,63 @@ func TestFastJoinWithNetworkDelay(t *testing.T) {
 	require.Less(t, span(jointrace.PCsCreate).Duration(), rtt/2, "local, under coord.fastjoin")
 }
 
+// TestFastJoinWithCandidatesInSDP is TestFastJoinWithNetworkDelay against an SFU whose
+// FastJoin answer and offer carry its candidates: ICE starts from the FastJoin response,
+// before the websocket has attached, and waits for nothing on it.
+func TestFastJoinWithCandidatesInSDP(t *testing.T) {
+	t.Parallel()
+
+	const rtt = 100 * time.Millisecond
+	m := newMediaSFU(t)
+	m.pub.candidatesInSDP.Store(true)
+	m.sub.candidatesInSDP.Store(true)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(m.fake)
+	call := fastJoinCall(t, f, "fast-join-candidates", WithNetworkDelay(rtt))
+	traces := make(chan jointrace.Trace, 1)
+	call.OnJoinTrace(func(tr jointrace.Trace) { traces <- tr })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	audio, err := webrtc.NewTrackLocalStaticSample(
+		webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeOpus}, "audio", "prefix:TRACK_TYPE_AUDIO")
+	require.NoError(t, err)
+	go writeSamplesUntilDone(ctx, audio)
+	go writeSamplesUntilDone(ctx, m.aliceAudio)
+	require.NoError(t, joinFast(t, call,
+		WithTrack(&sfu_models.TrackInfo{TrackId: "published-audio", TrackType: sfu_models.TrackType_TRACK_TYPE_AUDIO}, audio),
+		WithOnTrack(SubscriberFunc(func(OnTrackReceived) {})),
+		WithPublisherPeerConfiguration(loopbackPeerConfig()),
+		WithSubscriberPeerConfiguration(loopbackPeerConfig())))
+	var trace jointrace.Trace
+	select {
+	case trace = <-traces:
+	case <-time.After(iceTimeout):
+		t.Fatalf("no media both ways; recorded so far:\n%s", call.JoinTrace())
+	}
+	t.Logf("\n%s", trace)
+
+	span := func(name string) jointrace.Span {
+		t.Helper()
+		s, ok := trace.Span(name)
+		require.True(t, ok, "no %s span", name)
+		return s
+	}
+	for _, name := range []string{jointrace.PubSFUCandidates, jointrace.SubSFUCandidates} {
+		_, ok := trace.Span(name)
+		require.False(t, ok, "a %s span: the candidates came with the FastJoin", name)
+	}
+	require.Equal(t, []string{jointrace.SFUFastJoin}, span(jointrace.PubICE).After)
+	require.Equal(t, []string{jointrace.SubAnswer}, span(jointrace.SubICE).After)
+	attached := span(jointrace.SFUWS).End
+	require.True(t, span(jointrace.PubICE).Start.Before(attached), "publisher ICE starts before the attach")
+	require.True(t, span(jointrace.SubICE).Start.Before(attached), "subscriber ICE starts before the attach")
+	require.Less(t, span(jointrace.SFUFastJoin).Duration(), 3*rtt, "the FastJoin waits for no gathering timeout")
+	names := trace.CriticalPath().Names()
+	require.NotContains(t, names, jointrace.SFUWS, "the attach is off the critical path")
+	require.NotContains(t, names, jointrace.SFUWSDial)
+}
+
 // TestFastJoinTriesTheNextCandidate: a candidate that refuses the client, or cannot be
 // reached, is followed by the next, and gets no websocket attach.
 func TestFastJoinTriesTheNextCandidate(t *testing.T) {

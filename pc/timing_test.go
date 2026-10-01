@@ -55,6 +55,43 @@ func TestTimingRecordsEachConnectionStepInOrder(t *testing.T) {
 	}, time.Second, 10*time.Millisecond, "the last report is the final timing")
 }
 
+// TestTimingCountsCandidatesInTheRemoteDescription connects to a peer that trickles
+// nothing and puts its candidates in its answer, as the SFU's FastJoin does.
+func TestTimingCountsCandidatesInTheRemoteDescription(t *testing.T) {
+	st := newPCTest(t)
+	cfg := newPCTestPeerConfig(t)
+	remote, err := webrtc.NewAPI(
+		webrtc.WithMediaEngine(cfg.MediaEngine),
+		webrtc.WithSettingEngine(cfg.SettingEngine),
+		webrtc.WithInterceptorRegistry(cfg.Registry),
+	).NewPeerConnection(webrtc.Configuration{})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = remote.Close() })
+	st.handler.onICECandidateSender = func(c *webrtc.ICECandidate, _ models.PeerType) error {
+		if c == nil {
+			return nil
+		}
+		return remote.AddICECandidate(c.ToJSON())
+	}
+
+	st.tr.Negotiate(true)
+	require.NoError(t, remote.SetRemoteDescription(st.waitForOffer()))
+	answer, err := remote.CreateAnswer(nil)
+	require.NoError(t, err)
+	gathered := webrtc.GatheringCompletePromise(remote)
+	require.NoError(t, remote.SetLocalDescription(answer))
+	<-gathered
+	require.Contains(t, remote.LocalDescription().SDP, "a=candidate:")
+	answered := time.Now()
+	st.tr.HandleRemoteDescription(*remote.LocalDescription())
+	st.waitForPCState(webrtc.PeerConnectionStateConnected, 2*time.Second)
+
+	timing := st.tr.Timing()
+	require.True(t, timing.RemoteCandidatesInDescription)
+	require.False(t, timing.FirstRemoteCandidate.Before(answered))
+	require.False(t, timing.ICEChecking.IsZero())
+}
+
 // TestTimingIsNotMovedByLaterStateChanges keeps the first connection's timing when the
 // transport goes through the same states again, as it does on an ICE restart.
 func TestTimingIsNotMovedByLaterStateChanges(t *testing.T) {
