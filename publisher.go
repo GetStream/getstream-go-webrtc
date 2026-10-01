@@ -188,6 +188,9 @@ func (p *publisher) AddTrack(info *sfu_models.TrackInfo, t webrtc.TrackLocal) (*
 	if err = configureTransceiver(tr, p.RTPCodecParameters(t)); err != nil {
 		return nil, err
 	}
+	if local, ok := t.(*track.Local); ok {
+		local.SetTransceiver(tr)
+	}
 	p.tracks.Set(&TrackDetails{
 		Info:        info,
 		Tracks:      []webrtc.TrackLocal{t},

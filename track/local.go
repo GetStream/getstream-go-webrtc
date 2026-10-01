@@ -31,6 +31,10 @@ const (
 	// maxLag is how far a slow provider may fall behind real time before the
 	// write loop stops catching up, so a stall does not end in a burst.
 	maxLag = 200 * time.Millisecond
+
+	// maxHeldAge is how old the audio frame held for the transport may be when
+	// it connects: a 20 ms frame and a late tick, never stale audio.
+	maxHeldAge = 40 * time.Millisecond
 )
 
 var (
@@ -128,6 +132,18 @@ type binding struct {
 	packetizer rtp.Packetizer
 	clockRate  uint32
 	clock      sampleClock
+	// holding is set on an audio binding until the sender's SRTP session
+	// exists. Pion drops every packet written before then, so the newest
+	// sample is kept in held instead and sent the moment it does.
+	holding bool
+	held    *heldSample
+}
+
+// heldSample is a sample written before the transport was connected.
+type heldSample struct {
+	sample media.Sample
+	opts   *SampleWriteOptions
+	at     time.Time
 }
 
 type pump struct {
@@ -194,8 +210,13 @@ func (s *Local) Bind(ctx webrtc.TrackLocalContext) (webrtc.RTPCodecParameters, e
 		_ = s.rtp.Unbind(ctx)
 		return codec, err
 	}
+	sender := s.sender()
+	b.holding = sender != nil && s.Kind() == webrtc.RTPCodecTypeAudio
 	s.binding.Store(b)
 	go s.readRTCP(b, ctx.RTCPReader())
+	if b.holding {
+		go s.sendHeldOnConnect(b, sender)
+	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,8 +296,10 @@ func (s *Local) Close() error {
 	return nil
 }
 
-// SetTransceiver records the transceiver the track is sent on; its mid is
-// stamped on simulcast packets.
+// SetTransceiver records the transceiver the track is sent on, before the
+// track is bound. Its mid is stamped on simulcast packets, and an audio track
+// sends the newest sample written before the transceiver's transport connected
+// as soon as it does. Without it, audio written before then is dropped.
 func (s *Local) SetTransceiver(transceiver *webrtc.RTPTransceiver) {
 	s.transceiver.Store(transceiver)
 }
@@ -284,6 +307,33 @@ func (s *Local) SetTransceiver(transceiver *webrtc.RTPTransceiver) {
 // Transceiver returns the transceiver set by SetTransceiver.
 func (s *Local) Transceiver() *webrtc.RTPTransceiver {
 	return s.transceiver.Load()
+}
+
+func (s *Local) sender() *webrtc.RTPSender {
+	if transceiver := s.transceiver.Load(); transceiver != nil {
+		return transceiver.Sender()
+	}
+	return nil
+}
+
+// sendHeldOnConnect waits for the sender's SRTP session, which pion creates
+// when DTLS connects, and writes the held sample, if it is fresh, straight
+// away rather than at the next frame. RTPSender.SetReadDeadline is the one
+// exported call that blocks until that session exists; the zero deadline is
+// the one pion starts with.
+func (s *Local) sendHeldOnConnect(b *binding, sender *webrtc.RTPSender) {
+	err := sender.SetReadDeadline(time.Time{})
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	held := b.held
+	b.holding, b.held = false, nil
+	if err != nil || held == nil || s.binding.Load() != b || time.Since(held.at) > maxHeldAge {
+		return
+	}
+	if err := s.writeSampleLocked(b, held.sample, held.opts); err != nil {
+		s.log.Debugw("could not write the held sample", "track", s.ID(), "error", err)
+	}
 }
 
 // Track returns the underlying pion track.
@@ -359,7 +409,10 @@ func (s *Local) Muted() bool {
 }
 
 // WriteSample packetizes a sample and writes it. It is dropped while the track
-// is unbound.
+// is unbound. On an audio track bound to a transceiver set with
+// SetTransceiver, samples written before the transport is connected are not
+// sent: the newest one is held and goes out when it connects, unless it is
+// older than 40 ms by then.
 //
 // The sample's RTP time comes from PacketTimestamp if set, else from the wall
 // clock Timestamp, else from Duration. It never lands closer to the previous
@@ -373,6 +426,21 @@ func (s *Local) WriteSample(sample media.Sample, opts *SampleWriteOptions) error
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	if b.holding {
+		sample.Data = append([]byte(nil), sample.Data...)
+		if opts != nil && opts.AudioLevel != nil {
+			level := *opts.AudioLevel
+			opts = &SampleWriteOptions{AudioLevel: &level}
+		}
+		b.held = &heldSample{sample: sample, opts: opts, at: time.Now()}
+		return nil
+	}
+	return s.writeSampleLocked(b, sample, opts)
+}
+
+// writeSampleLocked places, packetizes and writes a sample. The caller holds
+// b.mu.
+func (s *Local) writeSampleLocked(b *binding, sample media.Sample, opts *SampleWriteOptions) error {
 	skip, span, err := b.clock.place(sample, b.clockRate)
 	if err != nil {
 		return err
