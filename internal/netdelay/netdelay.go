@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/pion/transport/v4/deadline"
+	"github.com/pion/transport/v5/deadline"
 )
 
 // DialFunc opens a network connection, like net.Dialer.DialContext.

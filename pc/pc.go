@@ -8,8 +8,9 @@ import (
 	"time"
 
 	"github.com/GetStream/protocol/protobuf/video/sfu/models"
-	"github.com/pion/dtls/v3/pkg/crypto/elliptic"
-	"github.com/pion/dtls/v3/pkg/protocol/handshake"
+	"github.com/pion/dtls/v4/pkg/crypto/elliptic"
+	"github.com/pion/dtls/v4/pkg/protocol"
+	"github.com/pion/dtls/v4/pkg/protocol/handshake"
 	"github.com/pion/ice/v4"
 	"github.com/pion/interceptor"
 	"github.com/pion/rtcp"
@@ -224,7 +225,24 @@ func newPeerConnection(params TransportParams) (*webrtc.PeerConnection, error) {
 	se.DisableSRTPReplayProtection(true)
 	se.DisableSRTCPReplayProtection(true)
 	se.SetDTLSRetransmissionInterval(dtlsRetransmissionInterval)
+	// As DTLS server (the publisher, which the SFU answers with a=setup:active) pion would
+	// answer the first ClientHello with a HelloVerifyRequest, costing a round trip. The ICE
+	// check has already proved the SFU's address, which is what that cookie exchange is
+	// for, and browsers never send one either.
+	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetICETimeouts(params.iceTimeouts())
+	// Offer the WARP connection setup (draft-uberti-tsvwg-warp) that the SFU negotiates in
+	// band: DTLS 1.3, and DTLS in the ICE checks (SPED). An SFU without them answers as
+	// before, so the connection falls back to DTLS 1.2 after ICE.
+	if err := se.SetDTLSVersionRange(protocol.Version1_2, protocol.Version1_3); err != nil {
+		return nil, xerr.Wrap(err)
+	}
+	se.EnableSped(true)
+	// On the subscriber, which the ICE-lite SFU offers, pion would answer passive and make
+	// the SFU the DTLS client, whose ClientHello can only ride our checks' responses, one
+	// datagram each. Answering active to an offer with SPED puts our one-datagram ClientHello
+	// in our first check, as browsers do.
+	se.SetAnsweringDTLSRoleWithSPED(webrtc.DTLSRoleClient)
 
 	// One line per handshake message we send pins down which direction a
 	// stalled handshake lost.
@@ -929,6 +947,13 @@ func (t *Transport) Timing() Timing {
 // SelectedPairRTT is the round-trip time ICE measured on the selected candidate pair, or
 // zero before it has one.
 func (t *Transport) SelectedPairRTT() time.Duration {
+	// pion reads the ICE transport's gatherer without its lock, while ICETransport.Start
+	// sets it. With SPED, Start runs inside the DTLS start, concurrently with callers here,
+	// so wait until ICE has connected, which happens after Start.
+	switch t.PC.ICEConnectionState() {
+	case webrtc.ICEConnectionStateNew, webrtc.ICEConnectionStateChecking:
+		return 0
+	}
 	dtls := dtlsTransportOf(t.PC)
 	if dtls == nil || dtls.ICETransport() == nil {
 		return 0
