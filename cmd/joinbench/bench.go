@@ -123,6 +123,9 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 			opts = append(opts, rtc.WithTrack(info, audio))
 		}
 	}
+	if flow == rtc.JoinFlowFast {
+		opts = append(opts, rtc.WithAudioReceiveSlots(uint32(b.cfg.AudioSlots)))
+	}
 	var err error
 	if j.resp, err = j.call.Join(ctx, opts...); err != nil {
 		return nil, fmt.Errorf("%s join: %w", user, err)
@@ -257,6 +260,11 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		CallID:    "joinbench-" + uuid.NewString()[:8],
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
 		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates,
+		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay),
+	}
+	if b.cfg.Flow == flowFast {
+		slots := b.cfg.AudioSlots
+		r.AudioSlots = &slots
 	}
 	if err := b.scenario(ctx, mode, scenario, cl, &r); err != nil {
 		r.Error = err.Error()
@@ -287,6 +295,9 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 		r.Publish = timeToMedia(aliceTrace, true)
 	}
 	if err != nil {
+		return err
+	}
+	if err := waitUntil(ctx, aliceTrace.JoinAt.Add(b.cfg.SecondJoinDelay)); err != nil {
 		return err
 	}
 
@@ -323,8 +334,25 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 	}
 	// Alice, in the call before bob, receives nothing until his audio.
 	aliceTrace, err = alice.await(ctx, jointrace.SubRTP)
+	r.addTrace(roleFirst, aliceID, aliceTrace)
 	r.PeerSubscribe = peerTimeToMedia(bobTrace, aliceTrace)
 	return err
+}
+
+// waitUntil returns at t, or with ctx's error if that comes first.
+func waitUntil(ctx context.Context, t time.Time) error {
+	d := time.Until(t)
+	if d <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (r *runResult) addTrace(role, user string, t jointrace.Trace) {

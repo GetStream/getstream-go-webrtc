@@ -37,6 +37,7 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 	c, err := parseConfig([]string{
 		"-mode", "warm", "-scenario", "pubsub, one-to-one", "-rtt", "0", "-runs", "3",
 		"-sfu", "sfu-2", "-location", "AMS", "-budget", "4", "-out", "x.jsonl",
+		"-second-join-delay", "2s", "-audio-slots", "0",
 	}, env(map[string]string{
 		"STREAM_BASE_URL": "http://127.0.0.1:4030", "STREAM_WS_URL": "ws://127.0.0.1:4800/api/v2/connect",
 		"STREAM_API_KEY": "key", "STREAM_API_SECRET": "secret",
@@ -49,6 +50,8 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 	require.Equal(t, "AMS", c.Location)
 	require.InDelta(t, 4, c.Budget, 0)
 	require.Equal(t, "x.jsonl", c.Out)
+	require.Equal(t, 2*time.Second, c.SecondJoinDelay)
+	require.Zero(t, c.AudioSlots)
 	require.Equal(t, "http://127.0.0.1:4030", c.BaseURL)
 	require.Equal(t, "ws://127.0.0.1:4800/api/v2/connect", c.WSURL)
 	require.Equal(t, "sfu-2", c.joinQuery().Get("sfu_id"))
@@ -86,6 +89,7 @@ func TestParseConfigRejects(t *testing.T) {
 		"unknown scenario": {[]string{"-scenario", "mesh"}, localEnv, `"mesh"`},
 		"no runs":          {[]string{"-runs", "0"}, localEnv, "-runs"},
 		"no budget":        {[]string{"-budget", "0"}, localEnv, "-budget"},
+		"negative delay":   {[]string{"-second-join-delay", "-1s"}, localEnv, "-second-join-delay"},
 		"two pins":         {[]string{"-sfu", "a", "-pin-tag", "b"}, localEnv, "pass one"},
 		"unknown env":      {[]string{"-env", "prod"}, localEnv, "want local or staging"},
 		"no credentials":   {nil, env(nil), "local-stack.sh env"},

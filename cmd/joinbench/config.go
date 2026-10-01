@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"strings"
 	"time"
@@ -55,6 +56,11 @@ type config struct {
 	// BreakCandidates is how many of each fast join's candidates get a broken setup
 	// grant (-break-candidates, fastjoinfault builds only), so the join falls back.
 	BreakCandidates int
+	// SecondJoinDelay is how long after alice's Join bob joins, at the earliest once
+	// she publishes; zero joins him as soon as she publishes.
+	SecondJoinDelay time.Duration
+	// AudioSlots is how many audio receive slots each fast join asks for.
+	AudioSlots uint
 
 	BaseURL   string
 	WSURL     string
@@ -85,6 +91,8 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.StringVar(&c.CallType, "call-type", "default", "call type")
 	fs.BoolVar(&c.Debug, "debug", false, "log the SDK at debug level to stderr")
 	fs.BoolVar(&c.DAG, "dag", false, "draw every measured join's DAG")
+	fs.DurationVar(&c.SecondJoinDelay, "second-join-delay", 0, "bob joins this long after alice's Join, at the earliest once she publishes (one-to-one: peer_subscribe then times a late joiner reaching a settled participant)")
+	fs.UintVar(&c.AudioSlots, "audio-slots", rtc.DefaultAudioReceiveSlots, "audio receive slots each fast join asks for (0: a later publisher's audio needs a renegotiation)")
 	faultFlags(fs, &c)
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -110,6 +118,12 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	}
 	if c.Budget <= 0 {
 		return config{}, fmt.Errorf("-budget %g: want more than 0", c.Budget)
+	}
+	if c.SecondJoinDelay < 0 {
+		return config{}, fmt.Errorf("-second-join-delay %s: want 0 or more", c.SecondJoinDelay)
+	}
+	if c.AudioSlots > math.MaxUint32 {
+		return config{}, fmt.Errorf("-audio-slots %d: too many", c.AudioSlots)
 	}
 	if c.BreakCandidates < 0 {
 		return config{}, fmt.Errorf("-break-candidates %d: want 0 or more", c.BreakCandidates)
