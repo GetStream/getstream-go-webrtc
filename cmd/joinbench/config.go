@@ -52,6 +52,9 @@ type config struct {
 	CallType string
 	Debug    bool
 	DAG      bool
+	// BreakCandidates is how many of each fast join's candidates get a broken setup
+	// grant (-break-candidates, fastjoinfault builds only), so the join falls back.
+	BreakCandidates int
 
 	BaseURL   string
 	WSURL     string
@@ -82,6 +85,7 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.StringVar(&c.CallType, "call-type", "default", "call type")
 	fs.BoolVar(&c.Debug, "debug", false, "log the SDK at debug level to stderr")
 	fs.BoolVar(&c.DAG, "dag", false, "draw every measured join's DAG")
+	faultFlags(fs, &c)
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -106,6 +110,12 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	}
 	if c.Budget <= 0 {
 		return config{}, fmt.Errorf("-budget %g: want more than 0", c.Budget)
+	}
+	if c.BreakCandidates < 0 {
+		return config{}, fmt.Errorf("-break-candidates %d: want 0 or more", c.BreakCandidates)
+	}
+	if c.BreakCandidates > 0 && c.Flow != flowFast {
+		return config{}, errors.New("-break-candidates needs -flow fast: only the fast join has candidates")
 	}
 	if c.SFU != "" && c.PinTag != "" {
 		return config{}, errors.New("-sfu and -pin-tag both pin the join: pass one")

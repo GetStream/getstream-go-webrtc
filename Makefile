@@ -56,5 +56,11 @@ check-no-private-deps:
 	@! go list -deps ./... | grep -E 'GetStream/(kit|video-sfu)' || \
 		{ echo 'ERROR: private GetStream dependency reached from this module'; exit 1; }
 
+# joinbench's fault injection (-break-candidates) exists only in builds with this tag.
+.PHONY: test-fault
+test-fault:
+	@go vet -tags fastjoinfault ./...
+	@go test -race -tags fastjoinfault -run 'BrokenGrant|BreakFastJoinGrants|BreakCandidates|TestFastJoin' . ./cmd/joinbench
+
 .PHONY: ci
-ci: build vet fmt-check test-race check-no-private-deps
+ci: build vet fmt-check test-race test-fault check-no-private-deps

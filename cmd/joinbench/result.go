@@ -28,6 +28,8 @@ type runResult struct {
 	SFU           string  `json:"sfu,omitempty"`
 	Location      string  `json:"location,omitempty"`
 	InjectedRTTMs float64 `json:"injected_rtt_ms"`
+	// BrokenCandidates is -break-candidates: the join fell back past that many SFUs.
+	BrokenCandidates int `json:"broken_candidates,omitempty"`
 
 	// RTTc and RTTs are the measured round trips to the coordinator and the SFU,
 	// averaged over the run's traces; RTTudp the media path's.

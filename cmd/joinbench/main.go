@@ -58,9 +58,10 @@ func run(cfg config, stdout io.Writer) error {
 		out = f
 	}
 
+	applyFaults(cfg)
 	b := newBench(cfg)
-	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q\n",
-		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location)
+	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q, broken candidates %d\n",
+		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location, cfg.BreakCandidates)
 	var results []runResult
 	var writeErr error
 	emit := func(r runResult) {

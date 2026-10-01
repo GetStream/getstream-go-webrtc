@@ -131,7 +131,12 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 		_ = j.call.Leave("joinbench: wrong flow")
 		return nil, fmt.Errorf("%s: asked for the %s flow, the join took %s", user, flow, got)
 	}
-	if b.cfg.SFU != "" && !samePin(b.cfg.SFU, j.sfu()) {
+	if b.cfg.BreakCandidates > 0 {
+		if err := b.checkFallback(j); err != nil {
+			_ = j.call.Leave("joinbench: no fallback")
+			return nil, err
+		}
+	} else if b.cfg.SFU != "" && !samePin(b.cfg.SFU, j.sfu()) {
 		_ = j.call.Leave("joinbench: wrong SFU")
 		return nil, fmt.Errorf("%s: asked for SFU %s, the coordinator returned %s", user, b.cfg.SFU, j.sfu())
 	}
@@ -142,6 +147,19 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 		}
 	}
 	return j, nil
+}
+
+// checkFallback checks that a join whose first candidates got broken grants was taken
+// by the candidate after them, and not by the pinned SFU, which is the first.
+func (b *bench) checkFallback(j *joined) error {
+	fast, _ := j.call.JoinTrace().Span(jointrace.SFUFastJoin)
+	if want := fmt.Sprintf("candidate %d of ", b.cfg.BreakCandidates+1); !strings.HasPrefix(fast.Note, want) {
+		return fmt.Errorf("%s: want the join taken by %s, sfu.fastjoin says %q", j.user, want+"N", fast.Note)
+	}
+	if b.cfg.SFU != "" && samePin(b.cfg.SFU, j.sfu()) {
+		return fmt.Errorf("%s: the pinned SFU %s took the join with a broken grant", j.user, b.cfg.SFU)
+	}
+	return nil
 }
 
 // samePin reports whether the coordinator's edge name is the pinned SFU id; staging
@@ -238,7 +256,7 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		CallID:    "joinbench-" + uuid.NewString()[:8],
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
-		InjectedRTTMs: ms(b.cfg.RTT),
+		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates,
 	}
 	if err := b.scenario(ctx, mode, scenario, cl, &r); err != nil {
 		r.Error = err.Error()

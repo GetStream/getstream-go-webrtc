@@ -315,7 +315,7 @@ func TestFastJoinTriesTheNextCandidate(t *testing.T) {
 			}, 5*time.Second, 10*time.Millisecond)
 			trace := call.JoinTrace()
 			fast, _ := trace.Span(jointrace.SFUFastJoin)
-			require.Equal(t, "candidate 2 of 2", fast.Note)
+			require.Contains(t, fast.Note, "candidate 2 of 2, after ")
 			dial, ok := trace.Span(jointrace.SFUWSDial)
 			require.True(t, ok)
 			ws, _ := trace.Span(jointrace.SFUWS)
