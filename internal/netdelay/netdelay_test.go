@@ -63,6 +63,30 @@ func TestTCPConnectAndEchoTakeOneRTTEach(t *testing.T) {
 	}
 }
 
+// pion-ice dials TURN over TCP with DialTCP, not Dial.
+func TestNetDialTCPConnectAndEchoTakeOneRTTEach(t *testing.T) {
+	t.Parallel()
+	addr, err := net.ResolveTCPAddr("tcp4", tcpEchoServer(t))
+	require.NoError(t, err)
+	n, err := NewNet(testRTT)
+	require.NoError(t, err)
+
+	start := time.Now()
+	conn, err := n.DialTCP("tcp4", nil, addr)
+	require.NoError(t, err)
+	defer conn.Close()
+	requireRTT(t, time.Since(start), "connect")
+
+	start = time.Now()
+	_, err = conn.Write([]byte("ping"))
+	require.NoError(t, err)
+	buf := make([]byte, 4)
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err)
+	requireRTT(t, time.Since(start), "echo")
+	require.Equal(t, "ping", string(buf))
+}
+
 func TestTCPKeepsOrderAcrossManyWrites(t *testing.T) {
 	t.Parallel()
 	conn, err := Dialer(testRTT, nil)(context.Background(), "tcp", tcpEchoServer(t))
