@@ -42,6 +42,9 @@ type runResult struct {
 
 	Publish   *toMedia `json:"publish,omitempty"`
 	Subscribe *toMedia `json:"subscribe,omitempty"`
+	// PeerSubscribe (one-to-one) is alice hearing bob: from bob's Call.Join to alice's
+	// first packet of his audio, in bob's RTT_s. It has no path: it spans two clients.
+	PeerSubscribe *toMedia `json:"peer_subscribe,omitempty"`
 
 	Traces []roleTrace `json:"traces"`
 	Error  string      `json:"error,omitempty"`
@@ -126,6 +129,21 @@ func timeToMedia(t jointrace.Trace, publish bool) *toMedia {
 	}
 	m.NetRTTs = round2(net)
 	m.TimerMs, m.LocalMs, m.WaitMs = round2(m.TimerMs), round2(m.LocalMs), round2(m.WaitMs)
+	return m
+}
+
+// peerTimeToMedia is the time from joiner's Call.Join to peer's first received packet,
+// or nil when peer received nothing.
+func peerTimeToMedia(joiner, peer jointrace.Trace) *toMedia {
+	first, ok := peer.Span(jointrace.SubRTP)
+	if !ok || joiner.JoinAt.IsZero() {
+		return nil
+	}
+	total := first.End.Sub(joiner.JoinAt)
+	m := &toMedia{Ms: ms(total)}
+	if ref := refRTT(joiner); ref > 0 {
+		m.RTTs = round2(float64(total) / float64(ref))
+	}
 	return m
 }
 
