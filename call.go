@@ -725,7 +725,8 @@ func awaitMigrationCompleteOn(client *signal.Client) *event.EventAwaiter[*sfu_ev
 }
 
 func (c *Call) SetCredentials(cred models.Credentials) {
-	c.logger.Debugf("setting credentials: %#+v", cred)
+	// The token and the TURN passwords are credentials: never log them.
+	c.logger.Debugf("setting credentials for %s (%s)", cred.Server.EdgeName, cred.Server.URL)
 	state := c.coordinatorState.Load()
 	if state == nil {
 		state = &CallState{}
