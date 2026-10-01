@@ -59,6 +59,7 @@ type signalingHandler struct {
 	onConnectionStateChange    func(webrtc.PeerConnectionState)
 	onIceConnectionStateChange func(webrtc.ICEConnectionState)
 	onNegotiationStateChanged  func(NegotiationState)
+	onSetLocalDescription      func(webrtc.SessionDescription)
 }
 
 func (h *signalingHandler) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) error {
@@ -112,6 +113,12 @@ func (h *signalingHandler) OnICEConnectionStateChange(iceState webrtc.ICEConnect
 	}
 }
 
+func (h *signalingHandler) OnSetLocalDescription(sd webrtc.SessionDescription) {
+	if h.onSetLocalDescription != nil {
+		h.onSetLocalDescription(sd)
+	}
+}
+
 func (h *signalingHandler) OnNegotiationStateChanged(state NegotiationState) {
 	if h.onNegotiationStateChanged != nil {
 		h.onNegotiationStateChanged(state)
@@ -128,7 +135,6 @@ func (h *signalingHandler) OnICECandidate(c *webrtc.ICECandidate) {
 }
 func (h *signalingHandler) OnICEGatheringStateChange(webrtc.ICEGatheringState) {}
 func (h *signalingHandler) OnNegotiationNeeded()                               {}
-func (h *signalingHandler) OnSetLocalDescription(webrtc.SessionDescription)    {}
 func (h *signalingHandler) OnSetLocalDescriptionSuccess()                      {}
 func (h *signalingHandler) OnSetRemoteDescription(webrtc.SessionDescription)   {}
 func (h *signalingHandler) OnSetRemoteDescriptionSuccess()                     {}
@@ -641,7 +647,7 @@ func TestPeerSubscriber_Connected(t *testing.T) {
 
 	require.Equal(t, NegotiationStateIdle, st.tr.negotiationState)
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -659,7 +665,7 @@ func TestPeerSubscriber_Signal_ICERestart(t *testing.T) {
 	require.Equal(t, NegotiationStateIdle, st.tr.negotiationState)
 
 	// Initial offer/answer exchange.
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -699,12 +705,12 @@ func TestPeerSubscriber_Signal_RetryOnConcurrentNegotiate(t *testing.T) {
 	remote := newRemotePeer(t, st.tr)
 
 	// First negotiation.
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1 := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
 	// Second negotiate while still waiting → no new offer, just arms retry.
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	st.waitForNegotiationState(NegotiationStateRenegotiatePending)
 
 	// Answer arrives → retry fires: state goes None then Remote with a new offer.
@@ -733,7 +739,7 @@ func TestPeerSubscriber_Signal_ICERestartDeferredToNextOffer(t *testing.T) {
 	gatherDone := webrtc.GatheringCompletePromise(st.tr.PC)
 
 	// Start negotiation and wait for the first offer.
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1 := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -825,7 +831,7 @@ func (st *pcTest) inFlightICERestart(remote *RemotePeer) (webrtc.SessionDescript
 	st.t.Helper()
 
 	gatherDone := webrtc.GatheringCompletePromise(st.tr.PC)
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1 := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 	waitForGatheringComplete(st.t, gatherDone)
@@ -890,7 +896,7 @@ func TestPeerSubscriber_Signal_ICERestartDeferredToNextOfferDropsStaleAnswerByNe
 
 	gatherDone := webrtc.GatheringCompletePromise(st.tr.PC)
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1, negotiationID1 := st.waitForOfferWithID()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -935,7 +941,7 @@ func TestPeerSubscriber_Signal_AnswerWithNegotiationIDGreaterThanRemoteButNotEqu
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1, negotiationID1 := st.waitForOfferWithID()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -944,7 +950,7 @@ func TestPeerSubscriber_Signal_AnswerWithNegotiationIDGreaterThanRemoteButNotEqu
 	st.waitForNegotiationState(NegotiationStateIdle)
 	require.Equal(t, negotiationID1, st.tr.remoteNegotiationID)
 
-	st.tr.Negotiate(false)
+	st.tr.Negotiate()
 	offer2, negotiationID2 := st.waitForOfferWithID()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 	require.Equal(t, negotiationID1, negotiationID2-1)
@@ -965,7 +971,7 @@ func TestPeerSubscriber_Signal_AnswerWithoutNegotiationIDPreservesLegacyBehavior
 
 	gatherDone := webrtc.GatheringCompletePromise(st.tr.PC)
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer1 := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -1010,7 +1016,7 @@ func TestPeerSubscriber_ICE_DisconnectionTriggersFailed(t *testing.T) {
 	remote := newRemotePeerWithControllableICE(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -1048,7 +1054,7 @@ func TestPeerSubscriber_ICE_ConnectedToFailedAndBackToConnected(t *testing.T) {
 	remote := newRemotePeerWithControllableICE(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -1085,7 +1091,7 @@ func TestPeerSubscriber_DTLS_GoesToFailedStateAfterFingerprintMismatch(t *testin
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -1115,7 +1121,7 @@ func TestPeerSubscriber_DTLS_PeerConnectionStateWhenRemoteNeverAnswersHandshake(
 	remote := newRemotePeerWithControllableICE(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 
@@ -1183,7 +1189,7 @@ func TestPCTransport_OnFailed_CarriesConnectionInfo(t *testing.T) {
 	remote := newRemotePeerWithControllableICE(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	remote.PauseWrites()
 	st.tr.HandleRemoteDescription(remote.Answer(offer))
@@ -1204,7 +1210,7 @@ func TestPCTransport_OnNeverConnected_AbruptClose(t *testing.T) {
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 	st.tr.HandleRemoteDescription(remote.Answer(offer))
@@ -1224,7 +1230,7 @@ func TestPCTransport_OnNeverConnected_NotFiredWhenConnected(t *testing.T) {
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 	st.tr.HandleRemoteDescription(remote.Answer(offer))
@@ -1253,7 +1259,7 @@ func TestPCTransport_OnNeverConnected_NotFiredAfterReconnecting(t *testing.T) {
 	remote := newRemotePeerWithControllableICE(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.waitForNegotiationState(NegotiationStateAwaitingAnswer)
 	st.tr.HandleRemoteDescription(remote.Answer(offer))
@@ -1282,7 +1288,7 @@ func TestPCTransport_CandidateForAnotherGenerationWaitsForItsDescription(t *test
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	st.tr.HandleRemoteDescription(remote.Answer(offer))
 	st.waitForPCState(webrtc.PeerConnectionStateConnected, 2*time.Second)
