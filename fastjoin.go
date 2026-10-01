@@ -242,12 +242,16 @@ func (c *Call) joinCandidates(
 		attempt := rec.Scratch()
 		attach := c.dialAttach(client, attempt)
 		stepCtx := jointrace.WithStep(ctx, attempt, jointrace.SFUFastJoin, jointrace.PeerSFU)
-		resp, err := client.FastJoin(stepCtx, c.fastJoinRequest(options, local, candidate))
+		req := c.fastJoinRequest(options, local, candidate)
+		breakFastJoinGrant(i, req)
+		attemptStart := time.Now()
+		resp, err := client.FastJoin(stepCtx, req)
 		outcome, err := fastJoinOutcome(resp, err)
 		if outcome == fastJoinJoined {
 			note := ""
 			if i > 0 {
-				note = fmt.Sprintf("candidate %d of %d", i+1, len(candidates))
+				note = fmt.Sprintf("candidate %d of %d, after %.1f ms on the ones before",
+					i+1, len(candidates), float64(attemptStart.Sub(start).Microseconds())/1000)
 			}
 			attempt.Add(jointrace.Span{
 				Name: jointrace.SFUFastJoin, After: []string{jointrace.CoordFastJoin, jointrace.PCsCreate},
