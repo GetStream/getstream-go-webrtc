@@ -5,8 +5,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/pion/transport/v4"
-	"github.com/pion/transport/v4/stdnet"
+	"github.com/pion/transport/v5"
+	"github.com/pion/transport/v5/stdnet"
 )
 
 // PacketConn is a datagram socket with delayed reads and writes.
