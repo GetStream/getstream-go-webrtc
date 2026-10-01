@@ -60,6 +60,21 @@ type sfuWebRTCPeer struct {
 	mu        sync.Mutex
 	remoteSet bool
 	pending   []webrtc.ICECandidateInit
+	// candidatesInSDP makes offers and answers carry the local candidates, as the SFU's
+	// FastJoin ones do; they are trickled as well.
+	candidatesInSDP atomic.Bool
+}
+
+// description is what the SFU sends for a local description it has just set.
+func (s *sfuWebRTCPeer) description(sd webrtc.SessionDescription) string {
+	if !s.candidatesInSDP.Load() {
+		return sd.SDP
+	}
+	select {
+	case <-webrtc.GatheringCompletePromise(s.PC):
+	case <-time.After(time.Second):
+	}
+	return s.PC.LocalDescription().SDP
 }
 
 // newSFUWebRTCPeer starts the SFU-side peer. peerType is the client peer it
@@ -90,16 +105,23 @@ func newSFUWebRTCPeer(t *testing.T, fake *testutil.FakeSFU, peerType sfu_models.
 		if err != nil {
 			return
 		}
-		// Errors are ignored on purpose: the connection is torn down at the
-		// end of the test while gathering may still be running.
-		_ = fake.Send(&sfu_events.SfuEvent{
+		trickle := &sfu_events.SfuEvent{
 			EventPayload: &sfu_events.SfuEvent_IceTrickle{
 				IceTrickle: &sfu_models.ICETrickle{
 					PeerType:     peerType,
 					IceCandidate: string(encoded),
 				},
 			},
-		}, iceTimeout)
+		}
+		// Errors are ignored on purpose: the connection is torn down at the
+		// end of the test while gathering may still be running.
+		if peer.candidatesInSDP.Load() {
+			// Send blocks until the websocket attaches, which follows the FastJoin that
+			// waits for gathering, and pion gathers no further while this handler runs.
+			go func() { _ = fake.Send(trickle, iceTimeout) }()
+			return
+		}
+		_ = fake.Send(trickle, iceTimeout)
 	})
 	return peer
 }
@@ -156,7 +178,7 @@ func (s *sfuWebRTCPeer) Answer(offerSDP string) (string, error) {
 	if err := s.PC.SetLocalDescription(answer); err != nil {
 		return "", err
 	}
-	return answer.SDP, nil
+	return s.description(answer), nil
 }
 
 // AcceptAnswer applies the subscriber's answer to the offer the SFU sent.
@@ -176,7 +198,7 @@ func (s *sfuWebRTCPeer) Offer() (string, error) {
 	if err := s.PC.SetLocalDescription(offer); err != nil {
 		return "", err
 	}
-	return offer.SDP, nil
+	return s.description(offer), nil
 }
 
 // iceUfrag returns the ICE username fragment an SDP offers. A restart is

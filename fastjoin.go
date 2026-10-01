@@ -504,7 +504,7 @@ func (a *fastAttach) join(req *sfu_events.JoinRequest, rec *jointrace.Recorder) 
 	rec.Add(jointrace.Span{
 		Name: jointrace.SFUWS, After: []string{jointrace.SFUWSDial, jointrace.SFUFastJoin},
 		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
-		Note: "attach; nothing waits for it but the SFU's candidates",
+		Note: "attach; nothing waits for it but candidates the FastJoin descriptions lacked",
 	})
 	return nil
 }

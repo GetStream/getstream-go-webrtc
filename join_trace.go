@@ -178,7 +178,8 @@ func (c *Call) peerSpans(publisher bool, t pc.Timing) {
 }
 
 // fastPeerSpans is peerSpans for a fast join. The offer and answer went with the
-// FastJoin, but the SFU's candidates still come on the websocket, so ICE waits for both.
+// FastJoin. When they carried the SFU's candidates, ICE waits for nothing else; an SFU
+// that only trickles them sends them on the websocket, so ICE also waits for its attach.
 func fastPeerSpans(rec *jointrace.Recorder, publisher bool, t pc.Timing) {
 	candidates, signalled := jointrace.SubSFUCandidates, jointrace.SubAnswer
 	ice, dtls := jointrace.SubICE, jointrace.SubDTLS
@@ -186,16 +187,20 @@ func fastPeerSpans(rec *jointrace.Recorder, publisher bool, t pc.Timing) {
 		candidates, signalled = jointrace.PubSFUCandidates, jointrace.SFUFastJoin
 		ice, dtls = jointrace.PubICE, jointrace.PubDTLS
 	}
-	if attached, ok := rec.Get(jointrace.SFUWS); ok {
-		rec.Add(jointrace.Span{
-			Name: candidates, After: []string{jointrace.SFUWS},
-			Start: attached.End, End: t.FirstRemoteCandidate,
-			Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
-			Note: "trickled on the websocket once it attaches",
-		})
+	iceAfter := []string{signalled}
+	if !t.RemoteCandidatesInDescription {
+		iceAfter = append(iceAfter, candidates)
+		if attached, ok := rec.Get(jointrace.SFUWS); ok {
+			rec.Add(jointrace.Span{
+				Name: candidates, After: []string{jointrace.SFUWS},
+				Start: attached.End, End: t.FirstRemoteCandidate,
+				Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+				Note: "trickled on the websocket once it attaches",
+			})
+		}
 	}
 	rec.Add(jointrace.Span{
-		Name: ice, After: []string{signalled, candidates},
+		Name: ice, After: iceAfter,
 		Start: t.ICEChecking, End: t.ICEConnected,
 		Kind: jointrace.KindNet, Peer: jointrace.PeerUDP,
 	})
