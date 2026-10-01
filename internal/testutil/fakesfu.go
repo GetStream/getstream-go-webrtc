@@ -56,10 +56,16 @@ type FakeSFU struct {
 
 	mu   sync.Mutex
 	conn *websocket.Connection[sfu_events.SfuRequest, sfu_events.SfuEvent]
+	// fastJoined are the sessions a FastJoin created, which a websocket may attach to.
+	fastJoined   map[string]bool
+	fastJoinSeen bool
+	noFastJoin   bool
 
-	connected chan struct{}
-	once      sync.Once
-	tls       bool
+	connected    chan struct{}
+	once         sync.Once
+	attached     chan struct{}
+	attachedOnce sync.Once
+	tls          bool
 }
 
 // FakeSFUOption configures a FakeSFU. Options are applied before the server
@@ -90,6 +96,14 @@ func WithTLS() FakeSFUOption {
 	}
 }
 
+// WithoutFastJoin serves no FastJoinServer, as an SFU from before the fast join: FastJoin
+// requests get twirp's bad_route.
+func WithoutFastJoin() FakeSFUOption {
+	return func(f *FakeSFU) {
+		f.noFastJoin = true
+	}
+}
+
 // WithSignalRPC overrides the twirp signalling RPC answers.
 func WithSignalRPC(rpc SignalRPC) FakeSFUOption {
 	return func(f *FakeSFU) {
@@ -111,6 +125,10 @@ type SignalRPC struct {
 	SendMetrics            func(context.Context, *sfu_signal_rpc.SendMetricsRequest) (*sfu_signal_rpc.SendMetricsResponse, error)
 	StartNoiseCancellation func(context.Context, *sfu_signal_rpc.StartNoiseCancellationRequest) (*sfu_signal_rpc.StartNoiseCancellationResponse, error)
 	StopNoiseCancellation  func(context.Context, *sfu_signal_rpc.StopNoiseCancellationRequest) (*sfu_signal_rpc.StopNoiseCancellationResponse, error)
+
+	// FastJoin answers the FastJoinServer's one RPC. By default it accepts with the
+	// JoinResponse's call state and no SDPs: nothing to answer and nothing to offer.
+	FastJoin func(context.Context, *sfu_signal_rpc.FastJoinRequest) (*sfu_signal_rpc.FastJoinResponse, error)
 }
 
 // NewFakeSFU starts a fake SFU. Close it when the test is done.
@@ -123,6 +141,8 @@ func NewFakeSFU(opts ...FakeSFUOption) *FakeSFU {
 		Authorizations: make(chan string, 64),
 		joinResponse:   &sfu_events.JoinResponse{},
 		connected:      make(chan struct{}),
+		fastJoined:     map[string]bool{},
+		attached:       make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(f)
@@ -135,6 +155,10 @@ func NewFakeSFU(opts ...FakeSFUOption) *FakeSFU {
 	mux.HandleFunc(wsPath, f.serve)
 	mux.Handle("/", f.recordAuthorization(sfu_signal_rpc.NewSignalServerServer(
 		&signalRPCService{f: f}, twirp.WithServerPathPrefix(""))))
+	if !f.noFastJoin {
+		fastJoin := sfu_signal_rpc.NewFastJoinServerServer(&fastJoinService{f: f}, twirp.WithServerPathPrefix(""))
+		mux.Handle(fastJoin.PathPrefix(), f.recordAuthorization(fastJoin))
+	}
 	f.srv = httptest.NewUnstartedServer(mux)
 	if f.tls {
 		f.srv.StartTLS()
@@ -194,11 +218,25 @@ func (f *FakeSFU) CloseConnection() error {
 // It writes to the most recent connection. After a reconnect, wait for that
 // connection's JoinRequest before sending: the fake records a request only once
 // the connection carrying it is installed.
+//
+// Once a FastJoin has started, Send also waits for a websocket to attach to it, as the
+// SFU sends a fast-joined participant nothing before.
 func (f *FakeSFU) Send(event *sfu_events.SfuEvent, timeout time.Duration) error {
+	deadline := time.After(timeout)
 	select {
 	case <-f.connected:
-	case <-time.After(timeout):
+	case <-deadline:
 		return xerr.Error("no client connected to the fake sfu")
+	}
+	f.mu.Lock()
+	fastJoining := f.fastJoinSeen
+	f.mu.Unlock()
+	if fastJoining {
+		select {
+		case <-f.attached:
+		case <-deadline:
+			return xerr.Error("no websocket attached to the fast join")
+		}
 	}
 
 	f.mu.Lock()
@@ -307,6 +345,9 @@ func (f *FakeSFU) serve(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			err = conn.Write(answer)
+			if err == nil && payload.JoinRequest.GetAttachFastJoin() && answer.GetJoinResponse() != nil {
+				f.attachedOnce.Do(func() { close(f.attached) })
+			}
 		case *sfu_events.SfuRequest_HealthCheckRequest:
 			err = conn.Write(&sfu_events.SfuEvent{
 				EventPayload: &sfu_events.SfuEvent_HealthCheckResponse{
@@ -325,6 +366,21 @@ func (f *FakeSFU) serve(w http.ResponseWriter, r *http.Request) {
 func (f *FakeSFU) joinAnswer(req *sfu_events.JoinRequest) *sfu_events.SfuEvent {
 	if f.onJoinRequest != nil {
 		return f.onJoinRequest(req)
+	}
+	if req.GetAttachFastJoin() {
+		f.mu.Lock()
+		joined := f.fastJoined[req.GetSessionId()]
+		f.mu.Unlock()
+		if !joined {
+			// As the SFU answers an attach with no FastJoin before it.
+			return &sfu_events.SfuEvent{EventPayload: &sfu_events.SfuEvent_Error{Error: &sfu_events.Error{
+				Error: &sfu_models.Error{
+					Code:    sfu_models.ErrorCode_ERROR_CODE_PARTICIPANT_NOT_FOUND,
+					Message: "participant not found",
+				},
+				ReconnectStrategy: sfu_models.WebsocketReconnectStrategy_WEBSOCKET_RECONNECT_STRATEGY_REJOIN,
+			}}}
+		}
 	}
 	return &sfu_events.SfuEvent{
 		EventPayload: &sfu_events.SfuEvent_JoinResponse{JoinResponse: f.joinResponse},
@@ -346,6 +402,32 @@ func (f *FakeSFU) recordRPC(req any) {
 	case f.RPCRequests <- req:
 	default:
 	}
+}
+
+// fastJoinService serves the twirp FastJoinServer. A FastJoin that succeeds is what a
+// websocket attach needs.
+type fastJoinService struct {
+	f *FakeSFU
+}
+
+var _ sfu_signal_rpc.FastJoinServer = (*fastJoinService)(nil)
+
+func (s *fastJoinService) FastJoin(ctx context.Context, req *sfu_signal_rpc.FastJoinRequest) (*sfu_signal_rpc.FastJoinResponse, error) {
+	s.f.recordRPC(req)
+	s.f.mu.Lock()
+	s.f.fastJoinSeen = true
+	s.f.mu.Unlock()
+	resp := &sfu_signal_rpc.FastJoinResponse{CallState: s.f.joinResponse.GetCallState()}
+	var err error
+	if h := s.f.rpc.FastJoin; h != nil {
+		resp, err = h(ctx, req)
+	}
+	if err == nil && resp.GetError() == nil {
+		s.f.mu.Lock()
+		s.f.fastJoined[req.GetSessionId()] = true
+		s.f.mu.Unlock()
+	}
+	return resp, err
 }
 
 // signalRPCService serves the twirp SignalServer, recording every request and

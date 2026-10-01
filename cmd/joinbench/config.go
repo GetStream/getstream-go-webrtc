@@ -68,7 +68,7 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs := flag.NewFlagSet("joinbench", flag.ContinueOnError)
 	fs.SetOutput(output)
 	fs.StringVar(&c.Env, "env", envLocal, "local (the T03 stack) or staging (STREAM_* from the environment)")
-	fs.StringVar(&c.Flow, "flow", flowLegacy, "join path: legacy (fast lands with T23)")
+	fs.StringVar(&c.Flow, "flow", flowLegacy, "join path: legacy (coordinator join, SFU websocket join) or fast (fast_join, FastJoin); a fast join that falls back to legacy fails the run")
 	fs.StringVar(&modes, "mode", "cold,warm", "comma-separated: cold (new Client per run), warm (one Client, one discarded join)")
 	fs.StringVar(&scenarios, "scenario", scenarioPubSub, "comma-separated: pubsub (alice publishes, bob subscribes), one-to-one (bob publishes and subscribes, timed)")
 	fs.DurationVar(&rtt, "rtt", rtt, "round trip injected with WithNetworkDelay (default 100ms for local, 0 for staging)")
@@ -90,11 +90,9 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	}
 
 	switch c.Flow {
-	case flowLegacy:
-	case flowFast:
-		return config{}, errors.New("-flow fast is not implemented yet: the fast join client lands with T23")
+	case flowLegacy, flowFast:
 	default:
-		return config{}, fmt.Errorf("-flow %q: want legacy", c.Flow)
+		return config{}, fmt.Errorf("-flow %q: want legacy or fast", c.Flow)
 	}
 	var err error
 	if c.Modes, err = list("mode", modes, modeCold, modeWarm); err != nil {

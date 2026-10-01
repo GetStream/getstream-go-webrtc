@@ -3,6 +3,7 @@ package coordinator
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
 	sfumodels "github.com/GetStream/protocol/protobuf/video/sfu/models"
@@ -14,6 +15,8 @@ type Error struct {
 	Code        int
 	Message     string
 	ShouldRetry bool
+	// Status is the HTTP status of the response the error came from, or zero.
+	Status int
 }
 
 func NewError(code int, message string, shouldRetry bool) *Error {
@@ -41,6 +44,13 @@ func IsUnknownUser(err error) bool {
 	}
 	_, rest, ok := strings.Cut(coordErr.Message, `"the user `)
 	return ok && strings.HasSuffix(rest, ` does not exist"`)
+}
+
+// IsNotFound reports whether err is an HTTP 404: for an endpoint, that the coordinator
+// or an edge in front of it does not have it.
+func IsNotFound(err error) bool {
+	coordErr := &Error{}
+	return errors.As(err, &coordErr) && coordErr.Status == http.StatusNotFound
 }
 
 // IsRetryableError reports whether err is worth retrying. Errors the

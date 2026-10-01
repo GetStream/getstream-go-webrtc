@@ -57,14 +57,18 @@ const (
 	SubRTP           = "sub.rtp"
 )
 
-// The steps of the fast join path.
+// The steps of the fast join path. It shares pcs.create, sfu.ws.dial, pub.sfu.candidates,
+// the ICE, DTLS and RTP steps and sub.sendanswer with the legacy path; until the SFU puts
+// its candidates in the SDPs they arrive on the websocket, which is why sfu.ws and the
+// *.sfu.candidates steps are still there.
 const (
-	CoordFastJoin = "coord.fastjoin"
-	SFUFastJoin   = "sfu.fastjoin"
-	SFUWS         = "sfu.ws"
-	SubAnswer     = "sub.answer"
-	PubICEDTLS    = "pub.ice+dtls"
-	SubICEDTLS    = "sub.ice+dtls"
+	CoordFastJoin    = "coord.fastjoin"
+	SFUFastJoin      = "sfu.fastjoin"
+	SFUWS            = "sfu.ws"
+	SubAnswer        = "sub.answer"
+	SubSFUCandidates = "sub.sfu.candidates"
+	PubICEDTLS       = "pub.ice+dtls"
+	SubICEDTLS       = "sub.ice+dtls"
 )
 
 // Suffixes of the detail spans a network step is split into. A detail span is named

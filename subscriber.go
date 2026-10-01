@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -69,6 +70,14 @@ type subscriber struct {
 
 	iceRecovery *iceRecovery
 
+	// fastPath marks a subscriber of a fast join: it sends the ICE-lite SFU no
+	// candidates, and sends its answers without holding up the peer connection.
+	fastPath atomic.Bool
+	// answerMu guards lastAnswer, the send of the previous answer, which the next one
+	// waits for so the SFU gets them in order.
+	answerMu   sync.Mutex
+	lastAnswer chan struct{}
+
 	Tracing atomic.Pointer[rtcstats.TraceBuffer]
 }
 
@@ -82,11 +91,7 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 			return a.SSRC < b.SSRC
 		}),
 	}
-	attempt := int64(c.reconnectAttempt.Load()) - 1
-	sfuid := c.cred.Load().Server.EdgeName
-	if c.statsEnabled() {
-		sub.Tracing.Store(rtcstats.NewSubTraceBuffer("", attempt, sfuid))
-	}
+	sub.startTracing()
 
 	if peerConfig.MediaEngine == nil {
 		peerConfig.MediaEngine = &webrtc.MediaEngine{}
@@ -157,6 +162,14 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 	return sub, nil
 }
 
+// startTracing gives the subscriber its stats trace buffer, when the call reports stats.
+func (s *subscriber) startTracing() {
+	if s.c.statsEnabled() {
+		attempt := int64(s.c.reconnectAttempt.Load()) - 1
+		s.Tracing.Store(rtcstats.NewSubTraceBuffer("", attempt, s.c.credentials().Server.EdgeName))
+	}
+}
+
 // requestICERestart asks the SFU to restart ICE on the subscriber peer
 // connection. The SFU responds with a new offer over the websocket, which
 // OnSubscriberOffer applies.
@@ -189,7 +202,7 @@ func (s *subscriber) Unbind() {
 }
 
 func (s *subscriber) OnICECandidateSender(c *webrtc.ICECandidate, target sfu_models.PeerType) error {
-	if c == nil {
+	if c == nil || s.fastPath.Load() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -281,6 +294,35 @@ func (s *subscriber) OnAnswer(sd webrtc.SessionDescription, negotiationId uint32
 		SessionId:     s.c.SessionID.Load(),
 		NegotiationId: negotiationId,
 	}
+	if s.fastPath.Load() {
+		s.c.subscriberAnswered(time.Now())
+		s.sendAnswerAsync(req)
+		return nil
+	}
+	return s.sendAnswer(req)
+}
+
+// sendAnswerAsync sends req without waiting for the SFU, so ICE can start on the
+// candidates queued behind it. Answers still reach the SFU one at a time and in order,
+// and a failed one is reported as a negotiation failure.
+func (s *subscriber) sendAnswerAsync(req *signal_rpc.SendAnswerRequest) {
+	done := make(chan struct{})
+	s.answerMu.Lock()
+	prev := s.lastAnswer
+	s.lastAnswer = done
+	s.answerMu.Unlock()
+	go func() {
+		defer close(done)
+		if prev != nil {
+			<-prev
+		}
+		if err := s.sendAnswer(req); err != nil {
+			s.ReportFailure("send answer", err)
+		}
+	}()
+}
+
+func (s *subscriber) sendAnswer(req *signal_rpc.SendAnswerRequest) error {
 	if s.beforeSendAnswer != nil {
 		if err := s.beforeSendAnswer(req); err != nil {
 			return xerr.Wrap(err)
@@ -292,14 +334,22 @@ func (s *subscriber) OnAnswer(sd webrtc.SessionDescription, negotiationId uint32
 	if err != nil {
 		return xerr.Wrap(err)
 	}
-	s.c.trace.mu.Lock()
-	offerAt := s.c.trace.subOfferAt
-	s.c.trace.mu.Unlock()
-	rec.Add(jointrace.Span{
-		Name: jointrace.SubSendAnswer, After: []string{jointrace.SubOffer},
-		Start: offerAt, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
-		Note: "includes creating the answer",
-	})
+	if answered, ok := rec.Get(jointrace.SubAnswer); ok {
+		rec.Add(jointrace.Span{
+			Name: jointrace.SubSendAnswer, After: []string{jointrace.SubAnswer},
+			Start: answered.End, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+			Note: "not awaited",
+		})
+	} else {
+		s.c.trace.mu.Lock()
+		offerAt := s.c.trace.subOfferAt
+		s.c.trace.mu.Unlock()
+		rec.Add(jointrace.Span{
+			Name: jointrace.SubSendAnswer, After: []string{jointrace.SubOffer},
+			Start: offerAt, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerSFU,
+			Note: "includes creating the answer",
+		})
+	}
 	// ICE may have finished while the RPC was in flight.
 	s.c.peerSpans(false, s.Timing())
 	if err := answer.GetError(); err != nil {

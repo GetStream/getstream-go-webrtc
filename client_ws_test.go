@@ -3,6 +3,7 @@ package rtc
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -32,21 +33,47 @@ type fakeCoordinator struct {
 	watches chan url.Values
 	events  chan string
 	known   atomic.Bool
+
+	// fastJoins receives the query of every fast_join. Until serveFastJoin, fast_join
+	// is a 404, as on a coordinator from before it.
+	fastJoins  chan url.Values
+	candidates atomic.Pointer[[]models.SFUCandidate]
+	token      string
+}
+
+// serveFastJoin makes fast_join answer with a candidate per SFU, in order.
+func (f *fakeCoordinator) serveFastJoin(sfus ...*testutil.FakeSFU) {
+	candidates := make([]models.SFUCandidate, len(sfus))
+	for i, sfu := range sfus {
+		cred := fakeSFUCredentials(sfu, fmt.Sprintf("sfu-fake-%d", i+1), f.token)
+		candidates[i] = models.SFUCandidate{Server: cred.Server, Token: cred.Token, SetupGrant: fmt.Sprintf("grant-%d", i+1)}
+	}
+	f.candidates.Store(&candidates)
 }
 
 func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) *fakeCoordinator {
 	t.Helper()
 
 	f := &fakeCoordinator{
-		sfu:     testutil.NewFakeSFU(),
-		joins:   make(chan url.Values, 4),
-		watches: make(chan url.Values, 4),
-		events:  make(chan string, 4),
+		sfu:       testutil.NewFakeSFU(),
+		joins:     make(chan url.Values, 4),
+		watches:   make(chan url.Values, 4),
+		events:    make(chan string, 4),
+		fastJoins: make(chan url.Values, 4),
 	}
 	t.Cleanup(f.sfu.Close)
 	f.known.Store(!unknownUsers)
 	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", "ws-user", time.Hour)
 	require.NoError(t, err)
+	f.token = token.Token
+	unknownUser := func(w http.ResponseWriter) bool {
+		if f.known.Load() {
+			return false
+		}
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"code":16,"message":"JoinCall failed with error: \"the user ws-user does not exist\"","StatusCode":404}`))
+		return true
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/v2/connect", func(w http.ResponseWriter, r *http.Request) {
@@ -88,12 +115,24 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/join", func(w http.ResponseWriter, r *http.Request) {
 		f.joins <- r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
-		if !f.known.Load() {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = w.Write([]byte(`{"code":16,"message":"JoinCall failed with error: \"the user ws-user does not exist\"","StatusCode":404}`))
+		if unknownUser(w) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(f.sfu, "sfu-fake", token.Token)})
+	})
+	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/fast_join", func(w http.ResponseWriter, r *http.Request) {
+		candidates := f.candidates.Load()
+		if candidates == nil {
+			http.NotFound(w, r)
+			return
+		}
+		f.fastJoins <- r.URL.Query()
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Server-Timing", "fastjoin;dur=1.5")
+		if unknownUser(w) {
+			return
+		}
+		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: *candidates})
 	})
 	mux.HandleFunc("GET /api/v2/video/call/{type}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		f.watches <- r.URL.Query()
@@ -105,16 +144,16 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 	return f
 }
 
-func (f *fakeCoordinator) client(t *testing.T) *Client {
+func (f *fakeCoordinator) client(t *testing.T, opts ...Option) *Client {
 	t.Helper()
 
 	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", "ws-user", time.Hour)
 	require.NoError(t, err)
 	client, err := NewClient(token.APIKey, User{ID: "ws-user"}, StaticToken(token.Token),
-		WithCoordinatorOptions(
+		append([]Option{WithCoordinatorOptions(
 			coordinator.ApiURL(f.srv.URL),
 			coordinator.WithWsURL("ws"+strings.TrimPrefix(f.srv.URL, "http")+"/api/v2/connect"),
-		))
+		)}, opts...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client

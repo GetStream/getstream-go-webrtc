@@ -75,6 +75,62 @@ func (r *Recorder) Extend(s Span) {
 	r.addLocked(s)
 }
 
+// Remove drops the named spans and their detail spans, for steps that are redone from
+// scratch and must be recorded again.
+func (r *Recorder) Remove(names ...string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sealed {
+		return
+	}
+	drop := make(map[string]bool, len(names))
+	for _, name := range names {
+		drop[name] = true
+	}
+	kept := r.order[:0]
+	for _, name := range r.order {
+		if s := r.spans[name]; drop[name] || drop[s.Parent] {
+			delete(r.spans, name)
+			continue
+		}
+		kept = append(kept, name)
+	}
+	r.order = kept
+}
+
+// Scratch returns an empty recorder with r's origin, for an attempt whose spans belong
+// in r only if it works out: Merge them then. It is nil when r is.
+func (r *Recorder) Scratch() *Recorder {
+	if r == nil {
+		return nil
+	}
+	return NewRecorder(r.origin)
+}
+
+// Merge records o's spans and round-trip times into r, as Add and SetRTT would.
+func (r *Recorder) Merge(o *Recorder) {
+	if r == nil || o == nil || r == o {
+		return
+	}
+	t := o.Trace()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, s := range t.Spans {
+		r.addLocked(s)
+	}
+	if r.sealed {
+		return
+	}
+	for p, d := range t.RTT {
+		if _, ok := r.rtt[p]; !ok {
+			r.rtt[p] = d
+		}
+	}
+}
+
 // Has reports whether a span of that name was recorded.
 func (r *Recorder) Has(name string) bool {
 	if r == nil {

@@ -81,8 +81,7 @@ func TestParseConfigRejects(t *testing.T) {
 		env  func(string) string
 		want string
 	}{
-		"fast flow":        {[]string{"-flow", "fast"}, localEnv, "T23"},
-		"unknown flow":     {[]string{"-flow", "quick"}, localEnv, "want legacy"},
+		"unknown flow":     {[]string{"-flow", "quick"}, localEnv, "want legacy or fast"},
 		"unknown mode":     {[]string{"-mode", "cold,hot"}, localEnv, `"hot"`},
 		"unknown scenario": {[]string{"-scenario", "mesh"}, localEnv, `"mesh"`},
 		"no runs":          {[]string{"-runs", "0"}, localEnv, "-runs"},

@@ -104,7 +104,16 @@ if _, err := call.AddTrack(track.TrackInfo(), track); err != nil {
 return writer.Write(audio.FromInt16(samples, 24000, 1))
 ```
 
+To publish from the start, pass the track to `Join` instead: `rtc.WithTrack(track.TrackInfo(), track)`.
+Its offer is then built while the coordinator request is in flight and answered by the SFU's
+join itself, where `AddTrack` after `Join` costs a renegotiation.
+
 ## Join latency
+
+`Join` takes the fast flow: one coordinator request returns candidate SFUs, and one request
+to the SFU joins, answers the publisher offer and returns the subscriber offer. Where the
+deployment has no fast join, it joins the legacy way; `call.JoinFlow()` says which ran, and
+`rtc.WithJoinFlow(rtc.JoinFlowLegacy)` asks for the legacy one.
 
 A call records how its first join went: every network step, timer and local step, what it
 waited for, and each step in round trips to its peer. `String()` draws it as a DAG with

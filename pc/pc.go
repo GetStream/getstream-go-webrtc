@@ -421,6 +421,12 @@ func (t *Transport) HandleRemoteDescriptionWithNegotiationID(sd webrtc.SessionDe
 	})
 }
 
+// ReportFailure hands err, from work done off the event loop on its behalf, to the
+// loop, which reports it through Handler.OnNegotiationFailed like its own failures.
+func (t *Transport) ReportFailure(name string, err error) {
+	t.enqueue(name, func() error { return err })
+}
+
 // AddICECandidate adds a candidate trickled by the SFU.
 func (t *Transport) AddICECandidate(candidate webrtc.ICECandidateInit) {
 	t.mu.Lock()

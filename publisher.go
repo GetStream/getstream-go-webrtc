@@ -40,7 +40,19 @@ type publisher struct {
 
 	iceRecovery *iceRecovery
 
+	// fastPath marks a publisher of a fast join: its first offer goes out with the
+	// FastJoin, and it sends the ICE-lite SFU no candidates.
+	fastPath atomic.Bool
+	// joinOffer, while set, takes the next offer instead of SetPublisher.
+	joinOffer atomic.Pointer[chan publisherOffer]
+
 	Tracing atomic.Pointer[rtcstats.TraceBuffer]
+}
+
+// publisherOffer is an offer the fast join sends to the SFU itself.
+type publisherOffer struct {
+	sdp           webrtc.SessionDescription
+	negotiationID uint32
 }
 
 type TrackDetails struct {
@@ -63,11 +75,7 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 		}),
 		c: c,
 	}
-	attempt := int64(c.reconnectAttempt.Load()) - 1
-	sfuid := c.cred.Load().Server.EdgeName
-	if c.statsEnabled() {
-		pub.Tracing.Store(rtcstats.NewPubTraceBuffer("", attempt, sfuid))
-	}
+	pub.startTracing()
 
 	if peerConfig.Registry == nil {
 		peerConfig.Registry = &interceptor.Registry{}
@@ -104,15 +112,8 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 		c.firstRTP(true, dtls, at)
 	}, nil))
 
-	cred := c.cred.Load()
 	if peerConfig.Config.ICEServers == nil {
-		for _, iceServer := range cred.IceServers {
-			peerConfig.Config.ICEServers = append(peerConfig.Config.ICEServers, webrtc.ICEServer{
-				URLs:       iceServer.Urls,
-				Username:   iceServer.Username,
-				Credential: iceServer.Password,
-			})
-		}
+		peerConfig.Config.ICEServers = iceServers(c.credentials().IceServers)
 	}
 
 	pub.Tracing.Load().Emit(rtcstats.PeerCreateEvent, peerConfig.Config)
@@ -136,6 +137,40 @@ func newPublisher(c *Call, peerConfig pc.PeerConfig) (*publisher, error) {
 		c.setReconnectStrategyAndDisconnect(sfu_models.WebsocketReconnectStrategy_WEBSOCKET_RECONNECT_STRATEGY_REJOIN)
 	})
 	return pub, nil
+}
+
+// startTracing gives the publisher its stats trace buffer, when the call reports stats.
+func (p *publisher) startTracing() {
+	if p.c.statsEnabled() {
+		attempt := int64(p.c.reconnectAttempt.Load()) - 1
+		p.Tracing.Store(rtcstats.NewPubTraceBuffer("", attempt, p.c.credentials().Server.EdgeName))
+	}
+}
+
+// joinOfferNow creates the publisher offer for a fast join, straight away rather than
+// after the negotiation debounce, and returns it instead of sending it with
+// SetPublisher. The SFU's answer comes back in the FastJoin response.
+func (p *publisher) joinOfferNow(ctx context.Context) (publisherOffer, error) {
+	offers := make(chan publisherOffer, 1)
+	p.joinOffer.Store(&offers)
+	p.Negotiate(true)
+	select {
+	case offer := <-offers:
+		return offer, nil
+	case <-ctx.Done():
+		p.joinOffer.Store(nil)
+		return publisherOffer{}, xerr.Wrapf(ctx.Err(), "create the publisher offer")
+	}
+}
+
+// trackInfos are the tracks the publisher sends, as the SFU is told about them.
+func (p *publisher) trackInfos() []*sfu_models.TrackInfo {
+	var tracks []*sfu_models.TrackInfo
+	p.tracks.Range(func(value *TrackDetails) bool {
+		tracks = append(tracks, value.Info)
+		return true
+	})
+	return tracks
 }
 
 func (p *publisher) AddTrack(info *sfu_models.TrackInfo, t webrtc.TrackLocal) (*webrtc.RTPTransceiver, error) {
@@ -210,7 +245,7 @@ func (p *publisher) AddSimulcastTracks(trackInfo *sfu_models.TrackInfo, tracks .
 }
 
 func (p *publisher) OnICECandidateSender(c *webrtc.ICECandidate, target sfu_models.PeerType) error {
-	if c == nil {
+	if c == nil || p.fastPath.Load() {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -277,6 +312,10 @@ func (p *publisher) OnTrack(t *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 }
 
 func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) error {
+	if offers := p.joinOffer.Swap(nil); offers != nil {
+		*offers <- publisherOffer{sdp: sd, negotiationID: negotiationID}
+		return nil
+	}
 	rec := p.c.trace.recorder()
 	rec.Add(jointrace.Span{
 		Name: jointrace.PubOffer, After: []string{jointrace.PubDebounce},
@@ -285,17 +324,10 @@ func (p *publisher) OnOffer(sd webrtc.SessionDescription, negotiationID uint32) 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*3)
 	defer cancel()
 
-	var tracks []*sfu_models.TrackInfo
-
-	p.tracks.Range(func(value *TrackDetails) bool {
-		tracks = append(tracks, value.Info)
-		return true
-	})
-
 	req := &sfu_signal_rpc.SetPublisherRequest{
 		Sdp:       sd.SDP,
 		SessionId: p.c.SessionID.Load(),
-		Tracks:    tracks,
+		Tracks:    p.trackInfos(),
 	}
 	sent := time.Now()
 	p.c.trace.mu.Lock()
