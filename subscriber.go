@@ -78,6 +78,8 @@ type subscriber struct {
 	answerMu   sync.Mutex
 	lastAnswer chan struct{}
 
+	slots receiveSlots
+
 	Tracing atomic.Pointer[rtcstats.TraceBuffer]
 }
 
@@ -255,7 +257,19 @@ func (s *subscriber) OnFailed(info pc.ConnectionInfo) {
 }
 
 func (s *subscriber) OnTrack(track *webrtc.TrackRemote, rtpReceiver *webrtc.RTPReceiver) {
+	if track.StreamID() == receiveSlotStreamID {
+		s.onReceiveSlotTrack(track, rtpReceiver)
+		return
+	}
 	participant, trackType := s.c.store.Load().LookupParticipantByTrack(track.StreamID())
+	if participant == nil {
+		s.logger.WithField("stream_id", track.StreamID()).Warn("dropping a track from an unknown participant")
+		return
+	}
+	s.deliverTrack(participant, trackType, track, rtpReceiver)
+}
+
+func (s *subscriber) deliverTrack(participant *Participant, trackType sfu_models.TrackType, track *webrtc.TrackRemote, rtpReceiver *webrtc.RTPReceiver) {
 	publisherParticipantID := ParticipantID{
 		UserID:    participant.UserID,
 		SessionID: participant.SessionID,

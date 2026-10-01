@@ -367,6 +367,12 @@ var callEventDispatchCases = []callEventDispatchCase{
 		},
 	},
 	{
+		Type: "*sfu_events.SfuEvent_AudioReceiveSlotBound",
+		Register: func(call *Call) (func(), bool) {
+			return dispatchCallEvent(call, func(*sfu_events.SfuEvent_AudioReceiveSlotBound) {})
+		},
+	},
+	{
 		Type: "*sfu_events.SfuEvent_CallEnded",
 		Register: func(call *Call) (func(), bool) {
 			return dispatchCallEvent(call, func(*sfu_events.SfuEvent_CallEnded) {})

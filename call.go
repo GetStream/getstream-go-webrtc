@@ -68,6 +68,9 @@ type joinOptions struct {
 	flow JoinFlow
 	// tracks are published from the start: see WithTrack.
 	tracks []trackWithInfo
+	// audioReceiveSlots is how many receive slots a fast join asks for: see
+	// WithAudioReceiveSlots.
+	audioReceiveSlots uint32
 
 	// used by integration tests to induce specific behaviour
 	beforeSubscriberSendAnswer func(*signal_rpc.SendAnswerRequest) error
@@ -78,9 +81,10 @@ func defaultJoinOptions() joinOptions {
 		reconnectDetails: &sfu_events.ReconnectDetails{
 			ReconnectAttempt: 0,
 		},
-		subscriber: SubscriberFunc(func(OnTrackReceived) {}),
-		create:     true,
-		flow:       JoinFlowFast,
+		subscriber:        SubscriberFunc(func(OnTrackReceived) {}),
+		create:            true,
+		flow:              JoinFlowFast,
+		audioReceiveSlots: DefaultAudioReceiveSlots,
 	}
 }
 
@@ -190,6 +194,26 @@ func WithMigratingFrom(sfuID string) JoinOption {
 func WithPreferredPublishOptions(opts ...*sfu_models.PublishOption) JoinOption {
 	return func(o *joinOptions) {
 		o.preferredPublishOptions = clonePublishOptions(opts)
+	}
+}
+
+// DefaultAudioReceiveSlots is how many audio receive slots a fast join asks for
+// unless WithAudioReceiveSlots says otherwise: enough for the other side of a
+// one-to-one call.
+const DefaultAudioReceiveSlots = 1
+
+// WithAudioReceiveSlots sets how many audio receive slots a fast join asks the
+// SFU for; 0 asks for none. The legacy join flow never has slots.
+//
+// A slot is an audio m-line the SFU offers before anyone publishes into it. The
+// audio of a participant who starts publishing later is bound to a free slot and
+// reaches OnTrack without a renegotiation, saving a round trip and the SFU's
+// negotiation debounce; once the slots are used up, later audio arrives through
+// a renegotiation as usual. Each slot costs an m-line in the subscriber offer,
+// and the SFU caps how many it grants.
+func WithAudioReceiveSlots(n uint32) JoinOption {
+	return func(o *joinOptions) {
+		o.audioReceiveSlots = n
 	}
 }
 
@@ -1657,6 +1681,15 @@ func (c *Call) OnTrackUnpublished(e *sfu_events.SfuEvent_TrackUnpublished) {
 		return
 	}
 	p.PublishedTracks.Remove(e.TrackUnpublished.GetType())
+}
+
+func (c *Call) OnAudioReceiveSlotBound(bound *sfu_events.SfuEvent_AudioReceiveSlotBound) {
+	sub := c.subscriberPeer()
+	if sub == nil {
+		c.logger.Warn("dropping audio receive slot binding: no subscriber peer connection")
+		return
+	}
+	sub.receiveSlotBound(bound.AudioReceiveSlotBound)
 }
 
 func (c *Call) OnError(eventError *sfu_events.SfuEvent_Error) {

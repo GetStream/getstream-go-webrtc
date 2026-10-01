@@ -12,6 +12,7 @@ import sfuevent "github.com/GetStream/protocol/protobuf/video/sfu/event"
 // never match, which is why the list is generated from the oneof itself.
 type Events interface {
 	*sfuevent.SfuEvent_AudioLevelChanged |
+		*sfuevent.SfuEvent_AudioReceiveSlotBound |
 		*sfuevent.SfuEvent_CallEnded |
 		*sfuevent.SfuEvent_CallGrantsUpdated |
 		*sfuevent.SfuEvent_ChangePublishOptions |
