@@ -22,6 +22,8 @@ type groupSummary struct {
 	Roles []roleSummary
 
 	Publish, Subscribe *mediaSummary
+	// PeerSubscribe is one-to-one's alice hearing bob, from bob's Join; not budgeted.
+	PeerSubscribe *mediaSummary
 
 	// Verdict is PASS or FAIL against the budget for a warm group, empty for cold.
 	Verdict string
@@ -93,6 +95,7 @@ func summarizeGroup(g groupSummary, runs []runResult, budget float64) groupSumma
 	g.RTTudpMs = median(values(ok, func(r runResult) (float64, bool) { return r.RTTudpMs, r.RTTudpMs > 0 }))
 	g.Publish = summarizeMedia(ok, func(r runResult) *toMedia { return r.Publish })
 	g.Subscribe = summarizeMedia(ok, func(r runResult) *toMedia { return r.Subscribe })
+	g.PeerSubscribe = summarizeMedia(ok, func(r runResult) *toMedia { return r.PeerSubscribe })
 
 	var roles []string
 	for _, r := range ok {
@@ -252,6 +255,10 @@ func printSummary(w io.Writer, c config, groups []groupSummary) {
 			}
 			fmt.Fprintf(w, "  %-10s %7.1f ms = %5.2f RTT  (path: %.2f RTT network + %.0f ms timers)  [%.0f, %.0f]\n",
 				m.name, m.s.Ms, m.s.RTTs, m.s.NetRTTs, m.s.TimerMs, m.s.MinMs, m.s.MaxMs)
+		}
+		if p := g.PeerSubscribe; p != nil {
+			fmt.Fprintf(w, "  %-10s %7.1f ms = %5.2f RTT  (alice hears bob, from bob's Join)  [%.0f, %.0f]\n",
+				"peer sub", p.Ms, p.RTTs, p.MinMs, p.MaxMs)
 		}
 		if g.Verdict != "" {
 			fmt.Fprintf(w, "warm budget %.1f RTT: %s\n", c.Budget, g.Verdict)

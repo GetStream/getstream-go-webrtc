@@ -45,8 +45,10 @@ func NewParticipantStore(call *Call, callState *sfu_models.CallState) *Participa
 
 func (s *ParticipantStore) LookupParticipantByTrack(streamID string) (*Participant, sfu_models.TrackType) {
 	parts := strings.Split(streamID, ":")
-	prefix := parts[0]
-	p := s.GetByTrackPrefix(prefix)
+	if len(parts) < 2 {
+		return nil, 0
+	}
+	p := s.GetByTrackPrefix(parts[0])
 	if p == nil {
 		return nil, 0
 	}

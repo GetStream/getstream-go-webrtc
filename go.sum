@@ -12,6 +12,8 @@ github.com/GetStream/protocol v1.49.0 h1:AzTRH6+PRNHjFjBlcymbjZsVE+wZBp/wPG6w+/9
 github.com/GetStream/protocol v1.49.0/go.mod h1:jZALur2IoWnpcLnFzLtnFomgItt4SBHj+U1TjPYC114=
 github.com/GetStream/protocol v1.50.0-3rtt.1 h1:kqsE1ZBf3gpO47lc2JLkyNVhVR9JNGFRYUtn83nLgIo=
 github.com/GetStream/protocol v1.50.0-3rtt.1/go.mod h1:jZALur2IoWnpcLnFzLtnFomgItt4SBHj+U1TjPYC114=
+github.com/GetStream/protocol v1.50.0-3rtt.2 h1:MOexK3ZKMg6wa9QqRWClY1BuV9FTtZuFrQKfqUfmy9I=
+github.com/GetStream/protocol v1.50.0-3rtt.2/go.mod h1:jZALur2IoWnpcLnFzLtnFomgItt4SBHj+U1TjPYC114=
 github.com/RaveNoX/go-jsoncommentstrip v1.0.0/go.mod h1:78ihd09MekBnJnxpICcwzCMzGrKSKYe4AqU6PDYYpjk=
 github.com/apapsch/go-jsonmerge/v2 v2.0.0 h1:axGnT1gRIfimI7gJifB699GoE/oq+F2MU7Dml6nw9rQ=
 github.com/apapsch/go-jsonmerge/v2 v2.0.0/go.mod h1:lvDnEdqiQrp0O42VQGgmlKpxL1AP2+08jFMw88y4klk=

@@ -86,6 +86,26 @@ func TestTimeToMediaCountsFromJoin(t *testing.T) {
 	require.Nil(t, timeToMedia(tr, true), "not reached")
 }
 
+func TestPeerTimeToMediaCountsFromTheJoinersJoin(t *testing.T) {
+	t.Parallel()
+
+	bob := legacyTrace(t)
+	rec := jointrace.NewRecorder(bob.JoinAt.Add(-time.Minute))
+	rec.Add(jointrace.Span{
+		Name: jointrace.SubRTP, Start: bob.JoinAt.Add(time.Second), End: bob.JoinAt.Add(1200 * time.Millisecond),
+		Kind: jointrace.KindNet, Peer: jointrace.PeerUDP,
+	})
+	alice := rec.Trace()
+
+	peer := peerTimeToMedia(bob, alice)
+	require.NotNil(t, peer)
+	require.InDelta(t, 1200, peer.Ms, 0.01, "from bob's Join, not alice's")
+	require.InDelta(t, 12, peer.RTTs, 0.01, "in bob's RTT_s")
+	require.Empty(t, peer.Path)
+
+	require.Nil(t, peerTimeToMedia(bob, jointrace.NewRecorder(bob.JoinAt).Trace()), "alice received nothing")
+}
+
 func TestRefRTTIsTheSFURoundTrip(t *testing.T) {
 	t.Parallel()
 

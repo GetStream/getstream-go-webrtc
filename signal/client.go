@@ -574,6 +574,8 @@ func (c *Client) handle(msg *sfu_events.SfuEvent) {
 	case *sfu_events.SfuEvent_TrackUnpublished:
 		c.Tracing.Load().Emit(rtcstats.SignalWSTrackUnpublishedEvent, m.TrackUnpublished)
 		c.handler.OnTrackUnpublished(m)
+	case *sfu_events.SfuEvent_AudioReceiveSlotBound:
+		c.handler.OnAudioReceiveSlotBound(m)
 	default:
 		c.logger.Warnf("unexpected message: %v", msg)
 	}

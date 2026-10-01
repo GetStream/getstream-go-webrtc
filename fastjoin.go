@@ -293,6 +293,7 @@ func (c *Call) fastJoinRequest(options joinOptions, local fastJoinLocal, candida
 		Capabilities:            options.clientCapabilities(),
 		Source:                  c.cc.source.toSfuParticipantSource(),
 		PreferredPublishOptions: options.preferredPublishOptions,
+		AudioReceiveSlots:       options.audioReceiveSlots,
 	}
 }
 

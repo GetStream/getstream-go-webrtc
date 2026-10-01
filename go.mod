@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/GetStream/getstream-go/v5 v5.2.0
-	github.com/GetStream/protocol v1.50.0-3rtt.1
+	github.com/GetStream/protocol v1.50.0-3rtt.2
 	github.com/gammazero/deque v1.1.0
 	github.com/gobwas/ws v1.4.0
 	github.com/golang-jwt/jwt/v5 v5.3.0

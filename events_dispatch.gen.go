@@ -136,6 +136,8 @@ func dispatchCallEvent[T CallEvents](call *Call, onEvent func(T)) (func(), bool)
 	// signal.Events
 	case *sfu_events.SfuEvent_AudioLevelChanged:
 		return signal.HandleEvent(call.Client(), castEventHandlerFunc[T, *sfu_events.SfuEvent_AudioLevelChanged](onEvent)), true
+	case *sfu_events.SfuEvent_AudioReceiveSlotBound:
+		return signal.HandleEvent(call.Client(), castEventHandlerFunc[T, *sfu_events.SfuEvent_AudioReceiveSlotBound](onEvent)), true
 	case *sfu_events.SfuEvent_CallEnded:
 		return signal.HandleEvent(call.Client(), castEventHandlerFunc[T, *sfu_events.SfuEvent_CallEnded](onEvent)), true
 	case *sfu_events.SfuEvent_CallGrantsUpdated:

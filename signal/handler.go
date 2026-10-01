@@ -56,6 +56,9 @@ type Handler interface {
 	// is no longer published. It is sent on muting a track or when the participant
 	// is leaving the call
 	OnTrackUnpublished(*sfu_events.SfuEvent_TrackUnpublished)
+	// OnAudioReceiveSlotBound tells which participant's audio the SFU bound to
+	// one of the audio receive slots this client asked for in its fast join.
+	OnAudioReceiveSlotBound(*sfu_events.SfuEvent_AudioReceiveSlotBound)
 	// OnError is used to communicate any error related to the participant. The
 	// error code and the message explain what went wrong. Whether the participant
 	// can retry is also indicated.
@@ -108,6 +111,8 @@ func (n NoOpHandler) OnHealthCheckResponse(response *sfu_events.SfuEvent_HealthC
 func (n NoOpHandler) OnTrackPublished(published *sfu_events.SfuEvent_TrackPublished) {}
 
 func (n NoOpHandler) OnTrackUnpublished(unpublished *sfu_events.SfuEvent_TrackUnpublished) {}
+
+func (n NoOpHandler) OnAudioReceiveSlotBound(bound *sfu_events.SfuEvent_AudioReceiveSlotBound) {}
 
 func (n NoOpHandler) OnError(eventError *sfu_events.SfuEvent_Error) {}
 

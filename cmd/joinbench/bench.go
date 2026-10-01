@@ -318,6 +318,12 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 		r.addTrace(roleSubscriber, bobID, bobTrace)
 	}
 	r.Subscribe = timeToMedia(bobTrace, false)
+	if err != nil || scenario != scenarioOneToOne {
+		return err
+	}
+	// Alice, in the call before bob, receives nothing until his audio.
+	aliceTrace, err = alice.await(ctx, jointrace.SubRTP)
+	r.PeerSubscribe = peerTimeToMedia(bobTrace, aliceTrace)
 	return err
 }
 
