@@ -34,6 +34,8 @@ type runResult struct {
 	BrokenCandidates int `json:"broken_candidates,omitempty"`
 	// SecondJoinDelayMs is -second-join-delay: bob joined that long after alice's Join.
 	SecondJoinDelayMs float64 `json:"second_join_delay_ms,omitempty"`
+	// GapMs is -gap: the pause after the previous call.
+	GapMs float64 `json:"gap_ms,omitempty"`
 	// AudioSlots is -audio-slots, for the fast flow.
 	AudioSlots *uint `json:"audio_slots,omitempty"`
 

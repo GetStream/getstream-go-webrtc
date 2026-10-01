@@ -61,6 +61,9 @@ type config struct {
 	SecondJoinDelay time.Duration
 	// AudioSlots is how many audio receive slots each fast join asks for.
 	AudioSlots uint
+	// Gap is the pause after each call before the next: in warm mode, how long the
+	// clients' connections sit idle between joins.
+	Gap time.Duration
 
 	BaseURL   string
 	WSURL     string
@@ -93,6 +96,7 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.BoolVar(&c.DAG, "dag", false, "draw every measured join's DAG")
 	fs.DurationVar(&c.SecondJoinDelay, "second-join-delay", 0, "bob joins this long after alice's Join, at the earliest once she publishes (one-to-one: peer_subscribe then times a late joiner reaching a settled participant)")
 	fs.UintVar(&c.AudioSlots, "audio-slots", rtc.DefaultAudioReceiveSlots, "audio receive slots each fast join asks for (0: a later publisher's audio needs a renegotiation)")
+	fs.DurationVar(&c.Gap, "gap", 500*time.Millisecond, "pause after each call before the next; in warm mode, how long the clients sit idle between joins")
 	faultFlags(fs, &c)
 	if err := fs.Parse(args); err != nil {
 		return config{}, err
@@ -121,6 +125,9 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	}
 	if c.SecondJoinDelay < 0 {
 		return config{}, fmt.Errorf("-second-join-delay %s: want 0 or more", c.SecondJoinDelay)
+	}
+	if c.Gap < 0 {
+		return config{}, fmt.Errorf("-gap %s: want 0 or more", c.Gap)
 	}
 	if c.AudioSlots > math.MaxUint32 {
 		return config{}, fmt.Errorf("-audio-slots %d: too many", c.AudioSlots)
