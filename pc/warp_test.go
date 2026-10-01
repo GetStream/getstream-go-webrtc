@@ -59,7 +59,7 @@ func TestWARPNegotiation(t *testing.T) {
 			}()
 			defer func() { close(done); <-polled }()
 
-			st.tr.Negotiate(true)
+			st.tr.Negotiate()
 			st.tr.HandleRemoteDescription(remote.Answer(st.waitForOffer()))
 			st.waitForPCState(webrtc.PeerConnectionStateConnected, 5*time.Second)
 

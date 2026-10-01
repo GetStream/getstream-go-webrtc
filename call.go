@@ -207,10 +207,9 @@ const DefaultAudioReceiveSlots = 1
 //
 // A slot is an audio m-line the SFU offers before anyone publishes into it. The
 // audio of a participant who starts publishing later is bound to a free slot and
-// reaches OnTrack without a renegotiation, saving a round trip and the SFU's
-// negotiation debounce; once the slots are used up, later audio arrives through
-// a renegotiation as usual. Each slot costs an m-line in the subscriber offer,
-// and the SFU caps how many it grants.
+// reaches OnTrack without a renegotiation, saving its round trip; once the slots
+// are used up, later audio arrives through a renegotiation as usual. Each slot
+// costs an m-line in the subscriber offer, and the SFU caps how many it grants.
 func WithAudioReceiveSlots(n uint32) JoinOption {
 	return func(o *joinOptions) {
 		o.audioReceiveSlots = n
@@ -1399,7 +1398,7 @@ func (c *Call) AddSimulcastTracks(trackInfo *sfu_models.TrackInfo, tracks ...web
 	if err != nil {
 		return nil, err
 	}
-	peerPub.Negotiate(false)
+	peerPub.Negotiate()
 	return transceiver, nil
 }
 
@@ -1413,7 +1412,7 @@ func (c *Call) AddTrack(trackInfo *sfu_models.TrackInfo, track webrtc.TrackLocal
 	if err != nil {
 		return nil, err
 	}
-	peerPub.Negotiate(false)
+	peerPub.Negotiate()
 	return t, nil
 }
 
@@ -1512,7 +1511,7 @@ func (c *Call) restorePublishedTracks() error {
 		}
 	}
 	// single neg after reestablish
-	pub.Negotiate(false)
+	pub.Negotiate()
 	c.logger.Info("restored published tracks, total:", len(c.publishedTracks), "tracks")
 	return nil
 }

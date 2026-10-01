@@ -33,13 +33,13 @@ func TestTimingRecordsEachConnectionStepInOrder(t *testing.T) {
 
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	st.tr.HandleRemoteDescription(remote.Answer(st.waitForOffer()))
 	st.waitForPCState(webrtc.PeerConnectionStateConnected, 2*time.Second)
 
 	timing := st.tr.Timing()
 	require.False(t, timing.NegotiationRequested.IsZero())
-	require.False(t, timing.OfferStarted.Before(timing.NegotiationRequested), "the offer waits for the debounce")
+	require.False(t, timing.OfferStarted.Before(timing.NegotiationRequested), "the offer follows the request")
 	require.False(t, timing.FirstRemoteCandidate.IsZero(), "the remote peer trickles its candidates")
 	require.False(t, timing.ICEChecking.IsZero())
 	require.False(t, timing.ICEChecking.Before(timing.OfferStarted))
@@ -74,7 +74,7 @@ func TestTimingCountsCandidatesInTheRemoteDescription(t *testing.T) {
 		return remote.AddICECandidate(c.ToJSON())
 	}
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	require.NoError(t, remote.SetRemoteDescription(st.waitForOffer()))
 	answer, err := remote.CreateAnswer(nil)
 	require.NoError(t, err)
@@ -98,7 +98,7 @@ func TestTimingIsNotMovedByLaterStateChanges(t *testing.T) {
 	st := newPCTest(t)
 	remote := newRemotePeer(t, st.tr)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	st.tr.HandleRemoteDescription(remote.Answer(st.waitForOffer()))
 	st.waitForPCState(webrtc.PeerConnectionStateConnected, 2*time.Second)
 	first := st.tr.Timing()

@@ -60,8 +60,8 @@ func run(cfg config, stdout io.Writer) error {
 
 	applyFaults(cfg)
 	b := newBench(cfg)
-	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q, broken candidates %d\n",
-		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location, cfg.BreakCandidates)
+	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q, broken candidates %d, second join delay %s, audio slots %d\n",
+		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location, cfg.BreakCandidates, cfg.SecondJoinDelay, cfg.AudioSlots)
 	var results []runResult
 	var writeErr error
 	emit := func(r runResult) {
@@ -106,7 +106,7 @@ func runLine(r runResult) string {
 	for _, m := range []struct {
 		name string
 		m    *toMedia
-	}{{"publish", r.Publish}, {"subscribe", r.Subscribe}} {
+	}{{"publish", r.Publish}, {"subscribe", r.Subscribe}, {"peer subscribe", r.PeerSubscribe}} {
 		if m.m != nil {
 			line += fmt.Sprintf(" %s %.0f ms (%.1f RTT),", m.name, m.m.Ms, m.m.RTTs)
 		}

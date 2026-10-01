@@ -22,9 +22,6 @@ import (
 )
 
 const (
-	// negotiationDebounce coalesces the Negotiate calls of a burst of track
-	// changes into one offer.
-	negotiationDebounce = 150 * time.Millisecond
 	// negotiationTimeout is how long a connected transport waits for an answer
 	// before it reports the negotiation as failed.
 	negotiationTimeout = 15 * time.Second
@@ -74,10 +71,12 @@ type Transport struct {
 	candidateQueue []*webrtc.ICECandidate
 	candidateWake  chan struct{}
 
-	mu             sync.Mutex
-	queue          []event
-	closed         bool
-	negotiateTimer *time.Timer
+	mu     sync.Mutex
+	queue  []event
+	closed bool
+	// offerQueued is set while a "send offer" event waits in the queue, so the
+	// Negotiate calls before it runs share its offer.
+	offerQueued    bool
 	connectTimer   *time.Timer
 	iceStartedAt   time.Time
 	iceConnectedAt time.Time
@@ -144,7 +143,7 @@ type TransportParams struct {
 // transport came up in the first place.
 type Timing struct {
 	// NegotiationRequested is the first Negotiate call; OfferStarted is when the first
-	// offer began to be created, after the debounce.
+	// offer began to be created.
 	NegotiationRequested time.Time
 	OfferStarted         time.Time
 	// FirstRemoteCandidate is when the SFU's first candidate arrived: trickled, or in its
@@ -348,7 +347,6 @@ func (t *Transport) Close() {
 	}
 	t.closed = true
 	t.queue = nil
-	stopTimer(&t.negotiateTimer)
 	stopTimer(&t.connectTimer)
 	close(t.stop)
 	t.mu.Unlock()
@@ -374,9 +372,10 @@ func (t *Transport) IsHealthy() bool {
 	return true
 }
 
-// Negotiate schedules an offer. Calls within negotiationDebounce of each other
-// share one offer; force sends it without waiting.
-func (t *Transport) Negotiate(force bool) {
+// Negotiate sends an offer as soon as no other is outstanding. Calls made before
+// it is created share it; calls made while it waits for its answer share one
+// more, sent after the answer.
+func (t *Transport) Negotiate() {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed {
@@ -385,25 +384,11 @@ func (t *Transport) Negotiate(force bool) {
 	if t.negotiationRequestedAt.IsZero() {
 		t.negotiationRequestedAt = time.Now()
 	}
-	if force {
-		stopTimer(&t.negotiateTimer)
-		t.enqueueLocked("send offer", t.sendOffer)
+	if t.offerQueued {
 		return
 	}
-	if t.negotiateTimer != nil {
-		return
-	}
-	var timer *time.Timer
-	timer = time.AfterFunc(negotiationDebounce, func() {
-		t.mu.Lock()
-		defer t.mu.Unlock()
-		if t.negotiateTimer != timer {
-			return
-		}
-		t.negotiateTimer = nil
-		t.enqueueLocked("send offer", t.sendOffer)
-	})
-	t.negotiateTimer = timer
+	t.offerQueued = true
+	t.enqueueLocked("send offer", t.sendOffer)
 }
 
 // ICERestart restarts ICE by renegotiating. Only the offerer can.
@@ -584,6 +569,10 @@ func (t *Transport) setNegotiationState(state NegotiationState) {
 }
 
 func (t *Transport) sendOffer() error {
+	// Cleared before the offer is created: a track added from here on needs another one.
+	t.mu.Lock()
+	t.offerQueued = false
+	t.mu.Unlock()
 	return t.offer(false)
 }
 

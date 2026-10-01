@@ -25,7 +25,7 @@ func TestTheClientDoesNotAskForAHelloVerifyCookie(t *testing.T) {
 	remote := newRemotePeerWithConfig(t, st.tr, cfg)
 	st.handler.onICECandidateSender = remote.ICECandidateSender
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	answer := remote.Answer(st.waitForOffer())
 	require.Contains(t, answer.SDP, "a=setup:active", "the peer answers as DTLS client, so the transport is the server")
 	st.tr.HandleRemoteDescription(answer)

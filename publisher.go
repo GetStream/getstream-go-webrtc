@@ -147,13 +147,12 @@ func (p *publisher) startTracing() {
 	}
 }
 
-// joinOfferNow creates the publisher offer for a fast join, straight away rather than
-// after the negotiation debounce, and returns it instead of sending it with
-// SetPublisher. The SFU's answer comes back in the FastJoin response.
+// joinOfferNow creates the publisher offer for a fast join and returns it instead of
+// sending it with SetPublisher. The SFU's answer comes back in the FastJoin response.
 func (p *publisher) joinOfferNow(ctx context.Context) (publisherOffer, error) {
 	offers := make(chan publisherOffer, 1)
 	p.joinOffer.Store(&offers)
-	p.Negotiate(true)
+	p.Negotiate()
 	select {
 	case offer := <-offers:
 		return offer, nil

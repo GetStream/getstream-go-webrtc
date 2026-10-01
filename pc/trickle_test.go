@@ -41,7 +41,7 @@ func TestSlowCandidateSendsDoNotHoldBackTheAnswer(t *testing.T) {
 		return remote.ICECandidateSender(c, target)
 	}
 
-	st.tr.Negotiate(true)
+	st.tr.Negotiate()
 	offer := st.waitForOffer()
 	// Let a few candidates queue up behind the offer, as they do while SetPublisher is
 	// in flight.

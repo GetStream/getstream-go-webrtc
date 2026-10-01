@@ -14,6 +14,8 @@ const (
 	roleSubscriber = "subscriber"
 	// roleBoth is a client measured both ways (one-to-one: bob, the second joiner).
 	roleBoth = "both"
+	// roleFirst is one-to-one's alice up to hearing bob (peer_subscribe).
+	roleFirst = "first"
 )
 
 // runResult is one JSON line of the output.
@@ -30,6 +32,10 @@ type runResult struct {
 	InjectedRTTMs float64 `json:"injected_rtt_ms"`
 	// BrokenCandidates is -break-candidates: the join fell back past that many SFUs.
 	BrokenCandidates int `json:"broken_candidates,omitempty"`
+	// SecondJoinDelayMs is -second-join-delay: bob joined that long after alice's Join.
+	SecondJoinDelayMs float64 `json:"second_join_delay_ms,omitempty"`
+	// AudioSlots is -audio-slots, for the fast flow.
+	AudioSlots *uint `json:"audio_slots,omitempty"`
 
 	// RTTc and RTTs are the measured round trips to the coordinator and the SFU,
 	// averaged over the run's traces; RTTudp the media path's.
