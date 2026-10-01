@@ -27,7 +27,9 @@ import (
 // once its websocket has connected, when unknownUsers is set.
 type fakeCoordinator struct {
 	srv *httptest.Server
-	sfu *testutil.FakeSFU
+	// conns counts the client's connections to srv.
+	conns *testutil.ConnCounter
+	sfu   *testutil.FakeSFU
 
 	joins   chan url.Values
 	watches chan url.Values
@@ -139,7 +141,10 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	})
-	f.srv = httptest.NewServer(mux)
+	f.srv = httptest.NewUnstartedServer(mux)
+	f.conns = testutil.CountConns(f.srv.Listener)
+	f.srv.Listener = f.conns
+	f.srv.Start()
 	t.Cleanup(f.srv.Close)
 	return f
 }
@@ -153,7 +158,7 @@ func (f *fakeCoordinator) client(t *testing.T, opts ...Option) *Client {
 		append([]Option{WithCoordinatorOptions(
 			coordinator.ApiURL(f.srv.URL),
 			coordinator.WithWsURL("ws"+strings.TrimPrefix(f.srv.URL, "http")+"/api/v2/connect"),
-		)}, opts...)...)
+		), WithoutKeepWarm()}, opts...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client

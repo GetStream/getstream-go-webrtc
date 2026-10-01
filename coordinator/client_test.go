@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -275,6 +277,40 @@ func TestWatchCallRequestPath(t *testing.T) {
 	require.Equal(t, "connection-1", got.query.Get("connection_id"))
 	require.Equal(t, "0", got.query.Get("members_limit"))
 	require.Empty(t, got.body)
+}
+
+// Warm is an authenticated GET /hi that any answer satisfies, sent on the transport the
+// client was given.
+func TestWarmSendsHiOnTheGivenTransport(t *testing.T) {
+	t.Parallel()
+
+	type capture struct {
+		method, path, auth string
+		query              url.Values
+	}
+	requests := make(chan capture, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests <- capture{method: r.Method, path: r.URL.Path, auth: r.Header.Get("Authorization"), query: r.URL.Query()}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	var dials atomic.Int32
+	dial := tr.DialContext
+	tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		dials.Add(1)
+		return dial(ctx, network, addr)
+	}
+	client := newTestClient(t, coordinator.ApiURL(srv.URL), coordinator.WithHTTPTransport(tr))
+	require.NoError(t, client.Warm(context.Background()))
+
+	got := <-requests
+	require.Equal(t, http.MethodGet, got.method)
+	require.Equal(t, "/hi", got.path)
+	require.Equal(t, "jwt-token", got.auth)
+	require.Equal(t, "jwt", got.query.Get("stream-auth-type"))
+	require.EqualValues(t, 1, dials.Load())
 }
 
 // A body the models cannot read reads no better on a second attempt.

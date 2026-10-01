@@ -131,7 +131,7 @@ func newTracedCall(t *testing.T, sfu *testutil.FakeSFU, clientOpts []Option, sig
 	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", userID, time.Hour)
 	require.NoError(t, err)
 
-	clientOpts = append([]Option{WithoutCoordinatorWS()}, clientOpts...)
+	clientOpts = append([]Option{WithoutCoordinatorWS(), WithoutKeepWarm()}, clientOpts...)
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token), clientOpts...)
 	require.NoError(t, err)
 
@@ -317,7 +317,7 @@ func TestJoinTraceOfASecondJoinOnTheSameClient(t *testing.T) {
 
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
 		WithCoordinatorOptions(coordinator.ApiURL(coord.URL)),
-		WithoutCoordinatorWS(), WithNetworkDelay(rtt))
+		WithoutCoordinatorWS(), WithoutKeepWarm(), WithNetworkDelay(rtt))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 
@@ -381,7 +381,8 @@ func TestCoordinatorRTTIsTheWebsocketRoundTrip(t *testing.T) {
 	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", "edge-user", time.Hour)
 	require.NoError(t, err)
 	client, err := NewClient(token.APIKey, User{ID: "edge-user"}, StaticToken(token.Token),
-		WithCoordinatorOptions(coordinator.WithWsURL("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v2/connect")), WithNetworkDelay(edge))
+		WithCoordinatorOptions(coordinator.WithWsURL("ws"+strings.TrimPrefix(srv.URL, "http")+"/api/v2/connect")), WithNetworkDelay(edge),
+		WithoutKeepWarm())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 

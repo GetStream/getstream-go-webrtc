@@ -448,6 +448,7 @@ func (c *Call) joinCoordinator(ctx context.Context, options joinOptions) error {
 	}
 	c.GetCred = getCred
 	c.cc.watchCall(c.callCtx, c.Type, c.Id)
+	c.cc.keepSFUsWarm([]string{result.Credentials.Server.URL}, result.Credentials.Server.URL)
 
 	cred := result.Credentials
 	// Store the coordinator state before building the signal client: the
@@ -1210,8 +1211,8 @@ func (c *Call) signalOptions() []signal.Option {
 	if c.cc.networkDelay > 0 {
 		opts = append(opts, signal.WithDialContext(netdelay.Dialer(c.cc.networkDelay, nil)))
 	}
-	if c.cc.sfuTransport != nil {
-		opts = append(opts, signal.WithRPCTransport(c.cc.sfuTransport))
+	if c.cc.transport != nil {
+		opts = append(opts, signal.WithRPCTransport(c.cc.transport))
 	}
 	return opts
 }
