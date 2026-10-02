@@ -56,6 +56,10 @@ type config struct {
 	// BreakCandidates is how many of each fast join's candidates get a broken setup
 	// grant (-break-candidates, fastjoinfault builds only), so the join falls back.
 	BreakCandidates int
+	// BreakRounds is how many of each fast join's fast_join answers get a broken grant
+	// on every candidate (-break-rounds, fastjoinfault builds only), so the join asks
+	// fast_join again with the SFUs that failed.
+	BreakRounds int
 	// SecondJoinDelay is how long after alice's Join bob joins, at the earliest once
 	// she publishes; zero joins him as soon as she publishes.
 	SecondJoinDelay time.Duration
@@ -137,6 +141,15 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	}
 	if c.BreakCandidates > 0 && c.Flow != flowFast {
 		return config{}, errors.New("-break-candidates needs -flow fast: only the fast join has candidates")
+	}
+	if c.BreakRounds != 0 && c.BreakRounds != 1 {
+		return config{}, fmt.Errorf("-break-rounds %d: want 0 or 1, the join asks fast_join twice", c.BreakRounds)
+	}
+	if c.BreakRounds > 0 && c.Flow != flowFast {
+		return config{}, errors.New("-break-rounds needs -flow fast: only the fast join has candidates")
+	}
+	if c.BreakRounds > 0 && c.BreakCandidates > 0 {
+		return config{}, errors.New("-break-rounds and -break-candidates: pass one")
 	}
 	if c.SFU != "" && c.PinTag != "" {
 		return config{}, errors.New("-sfu and -pin-tag both pin the join: pass one")

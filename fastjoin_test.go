@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/twitchtv/twirp"
 
+	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
 	"github.com/GetStream/getstream-go-webrtc/jointrace"
 )
@@ -382,6 +383,176 @@ func TestFastJoinTriesTheNextCandidate(t *testing.T) {
 	}
 }
 
+// fastJoinBody returns the body of the next fast_join f received.
+func fastJoinBody(t *testing.T, f *fakeCoordinator) models.JoinCallRequest {
+	t.Helper()
+	select {
+	case req := <-f.fastJoinBodies:
+		return req
+	default:
+		require.FailNow(t, "no fast_join body left")
+		return models.JoinCallRequest{}
+	}
+}
+
+func migratingFromList(req models.JoinCallRequest) []string {
+	if req.MigratingFromList == nil {
+		return nil
+	}
+	return *req.MigratingFromList
+}
+
+// TestFastJoinSkipsBrokenSFUs: broken candidates in a row, each broken its own way,
+// are skipped one after the other, within the first fast_join.
+func TestFastJoinSkipsBrokenSFUs(t *testing.T) {
+	t.Parallel()
+
+	full := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_SFU_FULL, "sfu is full"),
+	}))
+	down := testutil.NewFakeSFU()
+	down.Close()
+	refusing := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "grant for another sfu"),
+	}))
+	good := testutil.NewFakeSFU()
+	for _, sfu := range []*testutil.FakeSFU{full, refusing, good} {
+		t.Cleanup(sfu.Close)
+	}
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(full, down, refusing, good)
+	call := fastJoinCall(t, f, "skips-broken")
+	require.NoError(t, joinFast(t, call))
+	require.Equal(t, JoinFlowFast, call.JoinFlow())
+	require.Equal(t, "sfu-fake-4", call.credentials().Server.EdgeName)
+
+	require.Len(t, f.fastJoins, 1, "no second fast_join while a candidate is left")
+	require.Empty(t, migratingFromList(fastJoinBody(t, f)))
+	fast, _ := call.JoinTrace().Span(jointrace.SFUFastJoin)
+	require.Contains(t, fast.Note, "candidate 4 of 4, after ")
+	for _, sfu := range []*testutil.FakeSFU{full, refusing} {
+		require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu), 1, "each broken SFU is tried once")
+	}
+}
+
+// TestFastJoinSkipsAnUnresponsiveSFU: a candidate that never answers its FastJoin is
+// given up after the signal client's RPC timeout, and the next takes the client.
+func TestFastJoinSkipsAnUnresponsiveSFU(t *testing.T) {
+	t.Parallel()
+
+	hung := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: func(ctx context.Context, _ *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		},
+	}))
+	good := testutil.NewFakeSFU()
+	t.Cleanup(hung.Close)
+	t.Cleanup(good.Close)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(hung, good)
+	call := fastJoinCall(t, f, "skips-unresponsive")
+	start := time.Now()
+	require.NoError(t, joinFast(t, call))
+	took := time.Since(start)
+	require.Equal(t, "sfu-fake-2", call.credentials().Server.EdgeName)
+	require.Len(t, f.fastJoins, 1)
+	require.GreaterOrEqual(t, took, fastJoinCandidateTimeout)
+	require.Less(t, took, fastJoinCandidateTimeout+2*time.Second, "the next candidate is tried after fastJoinCandidateTimeout")
+}
+
+// TestFastJoinWaitsLongerForTheLastCandidate: with no candidate after it, a slow SFU
+// is not cut off at fastJoinCandidateTimeout.
+func TestFastJoinWaitsLongerForTheLastCandidate(t *testing.T) {
+	t.Parallel()
+
+	slow := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: func(ctx context.Context, _ *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+			select {
+			case <-time.After(fastJoinCandidateTimeout + 500*time.Millisecond):
+				return &signal_rpc.FastJoinResponse{}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}))
+	t.Cleanup(slow.Close)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(slow)
+	call := fastJoinCall(t, f, "waits-for-last")
+	require.NoError(t, joinFast(t, call))
+	require.Equal(t, "sfu-fake-1", call.credentials().Server.EdgeName)
+	require.Len(t, f.fastJoins, 1)
+}
+
+// TestFastJoinRetriesWithTheFailedSFUs: when every candidate fails, fast_join is asked
+// once more with them in migrating_from_list. The coordinator returns other SFUs first,
+// and the same ones when there are no others.
+func TestFastJoinRetriesWithTheFailedSFUs(t *testing.T) {
+	t.Parallel()
+
+	t.Run("other SFUs", func(t *testing.T) {
+		t.Parallel()
+
+		full := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+			FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_SFU_FULL, "sfu is full"),
+		}))
+		down := testutil.NewFakeSFU()
+		down.Close()
+		good := testutil.NewFakeSFU()
+		t.Cleanup(full.Close)
+		t.Cleanup(good.Close)
+		f := newFakeCoordinator(t, 0, false)
+		f.serveFastJoin(full, down, good)
+		f.candidateLimit.Store(2)
+		call := fastJoinCall(t, f, "retry-others")
+		require.NoError(t, joinFast(t, call))
+		require.Equal(t, JoinFlowFast, call.JoinFlow())
+		require.Equal(t, "sfu-fake-3", call.credentials().Server.EdgeName)
+
+		require.Len(t, f.fastJoins, 2)
+		require.Empty(t, migratingFromList(fastJoinBody(t, f)))
+		require.Equal(t, []string{"sfu-fake-1", "sfu-fake-2"}, migratingFromList(fastJoinBody(t, f)))
+		require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](full), 1, "the failed SFU is not tried before the new one")
+		req, err := testutil.NextRPCRequest[*signal_rpc.FastJoinRequest](good, time.Second)
+		require.NoError(t, err)
+		require.Equal(t, "grant-3", req.GetSetupGrant())
+		fast, _ := call.JoinTrace().Span(jointrace.SFUFastJoin)
+		require.Contains(t, fast.Note, "candidate 1 of 2 of fast_join 2, after ")
+		require.Empty(t, f.joins, "no legacy join")
+	})
+
+	t.Run("the same SFUs when there are no others", func(t *testing.T) {
+		t.Parallel()
+
+		var calls atomic.Int32
+		flaky := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+			FastJoin: func(ctx context.Context, req *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+				if calls.Add(1) == 1 {
+					return sfuError(sfu_models.ErrorCode_ERROR_CODE_SFU_FULL, "sfu is full")(ctx, req)
+				}
+				return &signal_rpc.FastJoinResponse{}, nil
+			},
+		}))
+		down := testutil.NewFakeSFU()
+		down.Close()
+		t.Cleanup(flaky.Close)
+		f := newFakeCoordinator(t, 0, false)
+		f.serveFastJoin(down, flaky)
+		call := fastJoinCall(t, f, "retry-same")
+		start := time.Now()
+		require.NoError(t, joinFast(t, call))
+		require.Equal(t, "sfu-fake-2", call.credentials().Server.EdgeName)
+
+		require.Len(t, f.fastJoins, 2)
+		fastJoinBody(t, f)
+		require.Equal(t, []string{"sfu-fake-1", "sfu-fake-2"}, migratingFromList(fastJoinBody(t, f)))
+		fast, _ := call.JoinTrace().Span(jointrace.SFUFastJoin)
+		require.Contains(t, fast.Note, "candidate 2 of 2 of fast_join 2, after ")
+		require.False(t, fast.Start.Before(start), "sfu.fastjoin starts with the first fast_join's candidates")
+	})
+}
+
 // TestFastJoinAsksForNewCandidatesOnce: when every candidate refuses the grant, the
 // grants may have expired, and fast_join is asked once more before Join gives up.
 func TestFastJoinAsksForNewCandidatesOnce(t *testing.T) {
@@ -422,6 +593,9 @@ func TestFastJoinAsksForNewCandidatesOnce(t *testing.T) {
 		err := joinFast(t, call)
 		require.ErrorContains(t, err, "bad token")
 		require.Len(t, f.fastJoins, fastJoinRounds)
+		fastJoinBody(t, f)
+		require.Equal(t, []string{"sfu-fake-1"}, migratingFromList(fastJoinBody(t, f)), "the failed SFU, which is returned again")
+		require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu), fastJoinRounds)
 		require.Empty(t, f.joins, "a refused grant is not a reason for the legacy join")
 	})
 }

@@ -32,6 +32,8 @@ type runResult struct {
 	InjectedRTTMs float64 `json:"injected_rtt_ms"`
 	// BrokenCandidates is -break-candidates: the join fell back past that many SFUs.
 	BrokenCandidates int `json:"broken_candidates,omitempty"`
+	// BrokenRounds is -break-rounds: the join asked fast_join again that many times.
+	BrokenRounds int `json:"broken_rounds,omitempty"`
 	// SecondJoinDelayMs is -second-join-delay: bob joined that long after alice's Join.
 	SecondJoinDelayMs float64 `json:"second_join_delay_ms,omitempty"`
 	// GapMs is -gap: the pause after the previous call.

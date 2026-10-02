@@ -10,7 +10,7 @@ import (
 	"github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
 )
 
-var brokenFastJoinGrants atomic.Int32
+var brokenFastJoinGrants, brokenFastJoinRounds atomic.Int32
 
 // BreakFastJoinGrants makes every later fast join send its first n candidates a setup
 // grant with a broken signature. Their SFUs verify it and refuse the client, as a full
@@ -23,8 +23,15 @@ func BreakFastJoinGrants(n int) {
 	brokenFastJoinGrants.Store(int32(n))
 }
 
-func breakFastJoinGrant(candidate int, req *signal_rpc.FastJoinRequest) {
-	if candidate < int(brokenFastJoinGrants.Load()) {
+// BreakFastJoinRounds breaks, as BreakFastJoinGrants does, the grant of every candidate
+// of each later fast join's first n fast_join answers, so the join asks fast_join again
+// with the SFUs that failed. Zero turns it off.
+func BreakFastJoinRounds(n int) {
+	brokenFastJoinRounds.Store(int32(n))
+}
+
+func breakFastJoinGrant(round, candidate int, req *signal_rpc.FastJoinRequest) {
+	if candidate < int(brokenFastJoinGrants.Load()) || round < int(brokenFastJoinRounds.Load()) {
 		req.SetupGrant = brokenGrant(req.GetSetupGrant())
 	}
 }

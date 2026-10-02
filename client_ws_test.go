@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,9 +60,36 @@ type fakeCoordinator struct {
 
 	// fastJoins receives the query of every fast_join. Until serveFastJoin, fast_join
 	// is a 404, as on a coordinator from before it.
-	fastJoins  chan url.Values
-	candidates atomic.Pointer[[]models.SFUCandidate]
-	token      string
+	fastJoins chan url.Values
+	// fastJoinBodies receives the body of every fast_join.
+	fastJoinBodies chan models.JoinCallRequest
+	candidates     atomic.Pointer[[]models.SFUCandidate]
+	// candidateLimit, when set, is how many candidates fast_join returns, as the
+	// coordinator returns at most 5.
+	candidateLimit atomic.Int32
+	token          string
+}
+
+// fastJoinCandidates is what fast_join returns for req: the candidates in order, those
+// in migrating_from_list last, as the coordinator orders them, up to candidateLimit.
+func (f *fakeCoordinator) fastJoinCandidates(req models.JoinCallRequest) []models.SFUCandidate {
+	var tryLast []string
+	if req.MigratingFromList != nil {
+		tryLast = *req.MigratingFromList
+	}
+	var first, last []models.SFUCandidate
+	for _, candidate := range *f.candidates.Load() {
+		if slices.Contains(tryLast, candidate.Server.EdgeName) {
+			last = append(last, candidate)
+		} else {
+			first = append(first, candidate)
+		}
+	}
+	all := append(first, last...)
+	if limit := int(f.candidateLimit.Load()); limit > 0 && len(all) > limit {
+		all = all[:limit]
+	}
+	return all
 }
 
 // serveFastJoin makes fast_join answer with a candidate per SFU, in order.
@@ -85,13 +113,14 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 	t.Helper()
 
 	f := &fakeCoordinator{
-		sfu:       testutil.NewFakeSFU(),
-		joins:     make(chan url.Values, 4),
-		watches:   make(chan watchRequest, 16),
-		events:    make(chan string, 4),
-		fastJoins: make(chan url.Values, 4),
-		auths:     make(chan string, 64),
-		drops:     make(chan struct{}),
+		sfu:            testutil.NewFakeSFU(),
+		joins:          make(chan url.Values, 4),
+		watches:        make(chan watchRequest, 16),
+		events:         make(chan string, 4),
+		fastJoins:      make(chan url.Values, 4),
+		fastJoinBodies: make(chan models.JoinCallRequest, 4),
+		auths:          make(chan string, 64),
+		drops:          make(chan struct{}),
 	}
 	t.Cleanup(f.sfu.Close)
 	f.known.Store(!unknownUsers)
@@ -197,18 +226,23 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(f.sfu, "sfu-fake", token.Token)})
 	})
 	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/fast_join", func(w http.ResponseWriter, r *http.Request) {
-		candidates := f.candidates.Load()
-		if candidates == nil {
+		if f.candidates.Load() == nil {
 			http.NotFound(w, r)
 			return
 		}
 		f.fastJoins <- r.URL.Query()
+		var req models.JoinCallRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		select {
+		case f.fastJoinBodies <- req:
+		default:
+		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Server-Timing", "fastjoin;dur=1.5")
 		if unknownUser(w) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: *candidates})
+		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: f.fastJoinCandidates(req)})
 	})
 	mux.HandleFunc("GET /api/v2/video/call/{type}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		select {
