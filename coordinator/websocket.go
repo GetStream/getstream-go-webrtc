@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"runtime/debug"
 	"sync/atomic"
 	"time"
@@ -16,9 +17,11 @@ import (
 )
 
 const (
-	// pingInterval is how often a health check is sent. The connection is
-	// considered dead after two intervals without one coming back.
-	pingInterval = 20 * time.Second
+	// defaultHealthCheckInterval is how often a health check is sent. The coordinator
+	// answers every frame with one, and closes a connection silent for 35 s.
+	defaultHealthCheckInterval = 20 * time.Second
+	// defaultHealthCheckTimeout is how long a health check may go unanswered.
+	defaultHealthCheckTimeout = 3 * time.Second
 	// readDeadline bounds how long the read loop waits for any frame.
 	readDeadline = 60 * time.Second
 )
@@ -29,6 +32,8 @@ type wsclient struct {
 
 	conn                 atomic.Pointer[websocket.Connection[ReadEvent, WriteEvent]]
 	lastHealthCheckNanos atomic.Int64
+	// closed is closed when the connection the last successful Connect opened is gone.
+	closed atomic.Pointer[chan struct{}]
 }
 
 func newWsClient(url string, c *Client) *wsclient {
@@ -38,37 +43,44 @@ func newWsClient(url string, c *Client) *wsclient {
 	}
 }
 
-func (wsc *wsclient) pingHandler(conn *websocket.Connection[ReadEvent, WriteEvent]) {
-	ticker := time.NewTicker(pingInterval)
+// pingHandler sends a health check every interval. A connection that answers none for
+// two intervals, or none within the timeout, is closed: that is what makes the client
+// reconnect.
+func (wsc *wsclient) pingHandler(conn *websocket.Connection[ReadEvent, WriteEvent], done <-chan struct{}) {
+	defer conn.Close()
+	ticker := time.NewTicker(wsc.c.healthCheckInterval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		if time.Now().UnixNano()-wsc.lastHealthCheckNanos.Load() > int64(pingInterval*2) {
-			wsc.c.logger.Warn("health check failed, closing connection")
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+		if time.Now().UnixNano()-wsc.lastHealthCheckNanos.Load() > int64(wsc.c.healthCheckInterval*2) {
+			wsc.c.logger.Warn("coordinator health check failed, closing connection")
 			return
 		}
 
-		if conn.IsClosed() {
-			return
-		}
-
-		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(wsc.c.healthCheckTimeout))
 		err := conn.Write(&WriteEvent{
 			Event: models.HealthCheckEvent{
 				Cid: ptrTo(AnyCall),
 			},
 		})
 		if err != nil {
-			wsc.c.logger.Error("failed to send health check request", err)
+			wsc.c.logger.Warn("failed to send coordinator health check, closing connection", err)
+			return
 		}
 	}
 }
 
-func (wsc *wsclient) readLoop(conn *websocket.Connection[ReadEvent, WriteEvent]) {
+func (wsc *wsclient) readLoop(conn *websocket.Connection[ReadEvent, WriteEvent], done chan<- struct{}) {
 	wsc.lastHealthCheckNanos.Store(time.Now().UnixNano())
 	defer func() {
 		_ = conn.Close()
-		wsc.conn.Store(nil)
+		wsc.conn.CompareAndSwap(conn, nil)
+		close(done)
 	}()
 	for {
 		if err := conn.SetReadDeadline(time.Now().Add(readDeadline)); err != nil {
@@ -81,7 +93,9 @@ func (wsc *wsclient) readLoop(conn *websocket.Connection[ReadEvent, WriteEvent])
 			if errors.As(err, &decError) {
 				continue
 			}
-			wsc.c.logger.Error("failed to read message", err)
+			if !conn.IsClosed() {
+				wsc.c.logger.Warn("coordinator websocket closed", err)
+			}
 			return
 		}
 
@@ -101,7 +115,8 @@ func (wsc *wsclient) handle(event models.WebsocketEvent) {
 
 // Connect opens the coordinator websocket, authenticates with joinRequest and
 // waits for the connection.ok event that carries the connection ID. There is no
-// automatic reconnect: callers own that policy.
+// automatic reconnect: callers own that policy, and Disconnected tells them when
+// the connection is gone. Ending ctx ends a Connect in flight.
 func (wsc *wsclient) Connect(ctx context.Context, joinRequest *models.WSAuthMessage) (*models.ConnectedEvent, error) {
 	if wsc == nil {
 		return nil, xerr.Error("ws client is nil")
@@ -129,30 +144,66 @@ func (wsc *wsclient) Connect(ctx context.Context, joinRequest *models.WSAuthMess
 		})
 
 	conn := websocket.NewConnection[ReadEvent, WriteEvent](wsConn, true, websocket.FormatText, codec)
+	// The auth exchange has no deadline of its own: closing the connection ends it.
+	stop := context.AfterFunc(ctx, func() { _ = conn.Close() })
 
 	if err := conn.Write(&WriteEvent{Event: joinRequest}); err != nil {
+		stop()
+		_ = conn.Close()
 		return nil, xerr.Wrapf(err, "send auth message")
 	}
 
 	response, err := conn.Read()
+	if !stop() {
+		_ = conn.Close()
+		return nil, xerr.Wrapf(ctx.Err(), "read auth response")
+	}
 	if err != nil {
+		_ = conn.Close()
 		return nil, xerr.Wrapf(err, "read auth response")
 	}
 
 	switch v := response.Event.(type) {
 	case *models.ConnectedEvent:
+		done := make(chan struct{})
+		wsc.closed.Store(&done)
 		wsc.conn.Store(conn)
-		go wsc.run(func() { wsc.pingHandler(conn) })
-		go wsc.run(func() { wsc.readLoop(conn) })
+		go wsc.run(func() { wsc.pingHandler(conn, done) })
+		go wsc.run(func() { wsc.readLoop(conn, done) })
 		wsc.handle(v)
 		return v, nil
 	case *models.ConnectionErrorEvent:
-		err = NewError(int(v.Error.Code), v.Error.Message, false)
+		_ = conn.Close()
 		wsc.handle(v)
-		return nil, fmt.Errorf("error response from server(%s): %w", wsc.url, err)
+		return nil, fmt.Errorf("error response from server(%s): %w", wsc.url, connectionError(v.Error))
 	default:
+		_ = conn.Close()
 		return nil, fmt.Errorf("unexpected response from server(%s): %v", wsc.url, response)
 	}
+}
+
+// connectionError is the coordinator refusing a websocket connect. Like a REST error,
+// it is retryable when the server rather than the request is at fault; a timeout, as
+// for the coordinator's own "try again" close code, too.
+func connectionError(e models.APIError) *Error {
+	status := int(e.StatusCode)
+	retry := status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || status/100 == 5
+	err := NewError(int(e.Code), e.Message, retry)
+	err.Status = status
+	return err
+}
+
+// Disconnected returns a channel that is closed once the connection the last
+// successful Connect opened is gone: closed by the server, by a failed health check
+// or by Close. It is nil before the first successful Connect.
+func (wsc *wsclient) Disconnected() <-chan struct{} {
+	if wsc == nil {
+		return nil
+	}
+	if done := wsc.closed.Load(); done != nil {
+		return *done
+	}
+	return nil
 }
 
 // run executes fn on the current goroutine, logging any panic instead of

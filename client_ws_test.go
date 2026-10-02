@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -24,7 +25,9 @@ import (
 
 // fakeCoordinator answers joins with credentials for a fake SFU, and its websocket
 // answers the auth wsDelay after the upgrade. Like the real one, it knows a user only
-// once its websocket has connected, when unknownUsers is set.
+// once its websocket has connected, when unknownUsers is set, gives the nth websocket
+// connection the id conn-n, and answers every frame the client sends on it with a
+// health check.
 type fakeCoordinator struct {
 	srv *httptest.Server
 	// conns counts the client's connections to srv.
@@ -32,9 +35,27 @@ type fakeCoordinator struct {
 	sfu   *testutil.FakeSFU
 
 	joins   chan url.Values
-	watches chan url.Values
+	watches chan watchRequest
 	events  chan string
 	known   atomic.Bool
+
+	// wsConnects counts websocket auth messages, wsOpen the websockets still open,
+	// wsMaxOpen the most open at once.
+	wsConnects, wsOpen, wsMaxOpen atomic.Int64
+	// auths receives the token of every websocket auth message.
+	auths chan string
+	// reconnectDelay is wsDelay for every connection after the first.
+	reconnectDelay atomic.Int64
+	// muted is the connection that no longer answers anything.
+	muted atomic.Int64
+	// drops makes the open websocket close.
+	drops chan struct{}
+	// refuse, when set, is the error the websocket answers an auth with instead of
+	// connection.ok; refuseToken limits it to auths carrying that token.
+	refuse      atomic.Pointer[models.APIError]
+	refuseToken atomic.Pointer[string]
+	// coordOpts are added to the client's coordinator options.
+	coordOpts []coordinator.Option
 
 	// fastJoins receives the query of every fast_join. Until serveFastJoin, fast_join
 	// is a 404, as on a coordinator from before it.
@@ -53,15 +74,24 @@ func (f *fakeCoordinator) serveFastJoin(sfus ...*testutil.FakeSFU) {
 	f.candidates.Store(&candidates)
 }
 
+// watchRequest is a GetCall that subscribes a websocket connection to a call.
+type watchRequest struct {
+	cid           string
+	connectionID  string
+	authorization string
+}
+
 func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) *fakeCoordinator {
 	t.Helper()
 
 	f := &fakeCoordinator{
 		sfu:       testutil.NewFakeSFU(),
 		joins:     make(chan url.Values, 4),
-		watches:   make(chan url.Values, 4),
+		watches:   make(chan watchRequest, 16),
 		events:    make(chan string, 4),
 		fastJoins: make(chan url.Values, 4),
+		auths:     make(chan string, 64),
+		drops:     make(chan struct{}),
 	}
 	t.Cleanup(f.sfu.Close)
 	f.known.Store(!unknownUsers)
@@ -84,32 +114,76 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 			return
 		}
 		defer conn.Close()
-		if _, err := wsutil.ReadClientText(conn); err != nil {
+		for open := f.wsOpen.Add(1); ; {
+			if most := f.wsMaxOpen.Load(); open <= most || f.wsMaxOpen.CompareAndSwap(most, open) {
+				break
+			}
+		}
+		defer f.wsOpen.Add(-1)
+		msg, err := wsutil.ReadClientText(conn)
+		if err != nil {
 			return
 		}
+		var auth models.WSAuthMessage
+		_ = json.Unmarshal(msg, &auth)
+		n := f.wsConnects.Add(1)
 		select {
-		case <-time.After(wsDelay):
-		case <-r.Context().Done():
-			return
+		case f.auths <- auth.Token:
+		default:
 		}
-		f.known.Store(true)
-		if err := wsutil.WriteServerText(conn, []byte(`{"type":"connection.ok","connection_id":"conn-1","me":{"id":"ws-user"}}`)); err != nil {
-			return
+		id := fmt.Sprintf("conn-%d", n)
+
+		var mu sync.Mutex
+		write := func(b []byte) error {
+			if f.muted.Load() == n {
+				return nil
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			return wsutil.WriteServerText(conn, b)
 		}
+		gone := make(chan struct{})
 		go func() {
+			defer close(gone)
 			for {
 				if _, _, err := wsutil.ReadClientData(conn); err != nil {
 					return
 				}
+				if err := write([]byte(`{"type":"health.check","connection_id":"` + id + `"}`)); err != nil {
+					return
+				}
 			}
 		}()
+
+		delay := wsDelay
+		if n > 1 {
+			delay = time.Duration(f.reconnectDelay.Load())
+		}
+		select {
+		case <-time.After(delay):
+		case <-gone:
+			return
+		}
+		if refused := f.refuse.Load(); refused != nil {
+			if only := f.refuseToken.Load(); only == nil || *only == auth.Token {
+				reply, _ := json.Marshal(models.ConnectionErrorEvent{Type: "connection.error", Error: *refused})
+				_ = write(reply)
+				return
+			}
+		}
+		f.known.Store(true)
+		if err := write([]byte(`{"type":"connection.ok","connection_id":"` + id + `","me":{"id":"ws-user"}}`)); err != nil {
+			return
+		}
 		for {
 			select {
 			case e := <-f.events:
-				if err := wsutil.WriteServerText(conn, []byte(e)); err != nil {
+				if err := write([]byte(e)); err != nil {
 					return
 				}
-			case <-r.Context().Done():
+			case <-f.drops:
+				return
+			case <-gone:
 				return
 			}
 		}
@@ -137,7 +211,15 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: *candidates})
 	})
 	mux.HandleFunc("GET /api/v2/video/call/{type}/{id}", func(w http.ResponseWriter, r *http.Request) {
-		f.watches <- r.URL.Query()
+		select {
+		case f.watches <- watchRequest{
+			cid:           r.PathValue("type") + ":" + r.PathValue("id"),
+			connectionID:  r.URL.Query().Get("connection_id"),
+			authorization: r.Header.Get("authorization"),
+		}:
+		case <-r.Context().Done():
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{}`))
 	})
@@ -152,16 +234,48 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 func (f *fakeCoordinator) client(t *testing.T, opts ...Option) *Client {
 	t.Helper()
 
-	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", "ws-user", time.Hour)
-	require.NoError(t, err)
-	client, err := NewClient(token.APIKey, User{ID: "ws-user"}, StaticToken(token.Token),
-		append([]Option{WithCoordinatorOptions(
+	return f.clientWithToken(t, StaticToken(f.token), opts...)
+}
+
+func (f *fakeCoordinator) clientWithToken(t *testing.T, token TokenProvider, opts ...Option) *Client {
+	t.Helper()
+
+	client, err := NewClient("test-api-key", User{ID: "ws-user"}, token,
+		append([]Option{WithCoordinatorOptions(append([]coordinator.Option{
 			coordinator.ApiURL(f.srv.URL),
-			coordinator.WithWsURL("ws"+strings.TrimPrefix(f.srv.URL, "http")+"/api/v2/connect"),
-		), WithoutKeepWarm()}, opts...)...)
+			coordinator.WithWsURL("ws" + strings.TrimPrefix(f.srv.URL, "http") + "/api/v2/connect"),
+		}, f.coordOpts...)...), WithoutKeepWarm()}, opts...)...)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })
 	return client
+}
+
+// drop closes the open websocket from the server's side.
+func (f *fakeCoordinator) drop(t *testing.T) {
+	t.Helper()
+
+	select {
+	case f.drops <- struct{}{}:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no websocket open to drop")
+	}
+}
+
+// awaitWatch waits for the call cid to be watched on connectionID, skipping other watches.
+func (f *fakeCoordinator) awaitWatch(t *testing.T, cid, connectionID string) watchRequest {
+	t.Helper()
+
+	deadline := time.After(10 * time.Second)
+	for {
+		select {
+		case w := <-f.watches:
+			if w.cid == cid && w.connectionID == connectionID {
+				return w
+			}
+		case <-deadline:
+			t.Fatalf("%s was never watched on %s", cid, connectionID)
+		}
+	}
 }
 
 func joinCall(t *testing.T, client *Client, id string) *Call {
@@ -196,12 +310,7 @@ func TestJoinDoesNotWaitForTheCoordinatorWebsocket(t *testing.T) {
 	ended := make(chan *models.CallEndedEvent, 1)
 	coordinator.HandleCallEvent(client, call.CID(), func(e *models.CallEndedEvent) { ended <- e })
 
-	select {
-	case q := <-f.watches:
-		require.Equal(t, "conn-1", q.Get("connection_id"), "the socket is subscribed to the call")
-	case <-time.After(5 * time.Second):
-		t.Fatal("the websocket was never subscribed to the call")
-	}
+	f.awaitWatch(t, call.CID(), "conn-1")
 	f.events <- `{"type":"call.ended","call_cid":"` + call.CID() + `","created_at":"2026-09-30T12:00:00Z"}`
 	select {
 	case e := <-ended:

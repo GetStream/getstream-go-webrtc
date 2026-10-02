@@ -48,13 +48,18 @@ type options struct {
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
 	transport     *http.Transport
 	joinQuery     url.Values
+
+	healthCheckInterval time.Duration
+	healthCheckTimeout  time.Duration
 }
 
 var defaultOptions = options{
-	apiURL:   "https://video.stream-io-api.com",
-	wsURL:    "wss://video.stream-io-api.com/api/v2/connect",
-	logger:   logger.Noop{},
-	enableWs: true,
+	apiURL:              "https://video.stream-io-api.com",
+	wsURL:               "wss://video.stream-io-api.com/api/v2/connect",
+	logger:              logger.Noop{},
+	enableWs:            true,
+	healthCheckInterval: defaultHealthCheckInterval,
+	healthCheckTimeout:  defaultHealthCheckTimeout,
 }
 
 // WithoutWebsocket disables the coordinator event websocket. The join REST
@@ -62,6 +67,20 @@ var defaultOptions = options{
 func WithoutWebsocket() Option {
 	return func(o *options) {
 		o.enableWs = false
+	}
+}
+
+// WithHealthCheck overrides how often the websocket sends a health check (20 s) and
+// how long one may go unanswered (3 s) before the connection is closed as dead.
+// Non-positive values keep the defaults.
+func WithHealthCheck(interval, timeout time.Duration) Option {
+	return func(o *options) {
+		if interval > 0 {
+			o.healthCheckInterval = interval
+		}
+		if timeout > 0 {
+			o.healthCheckTimeout = timeout
+		}
 	}
 }
 
@@ -142,6 +161,10 @@ type CoordinatorClientInterface interface {
 		ctx context.Context,
 		joinRequest *models.WSAuthMessage,
 	) (*models.ConnectedEvent, error)
+
+	// Disconnected is closed once the websocket the last successful Connect opened
+	// is gone; nil before that.
+	Disconnected() <-chan struct{}
 
 	GetInterceptor() *event.Store[models.WebsocketEvent]
 
@@ -278,6 +301,11 @@ func (c *Client) WatchCall(ctx context.Context, _type, id, connectionID string) 
 		},
 		map[string]any{"connection_id": connectionID, "members_limit": 0}, nil, &response)
 	return xerr.Wrapf(err, "watch call %s:%s", _type, id)
+}
+
+// SetToken replaces the token the REST requests carry, after the old one expired.
+func (c *Client) SetToken(token string) {
+	c.token.Store(&token)
 }
 
 func (c *Client) Close() error {

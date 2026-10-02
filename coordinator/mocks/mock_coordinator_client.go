@@ -27,6 +27,9 @@ var _ coordinator.CoordinatorClientInterface = &CoordinatorClientInterfaceMock{}
 //			ConnectFunc: func(ctx context.Context, joinRequest *models.WSAuthMessage) (*models.ConnectedEvent, error) {
 //				panic("mock out the Connect method")
 //			},
+//			DisconnectedFunc: func() <-chan struct{} {
+//				panic("mock out the Disconnected method")
+//			},
 //			FastJoinCallFunc: func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error) {
 //				panic("mock out the FastJoinCall method")
 //			},
@@ -51,6 +54,9 @@ type CoordinatorClientInterfaceMock struct {
 
 	// ConnectFunc mocks the Connect method.
 	ConnectFunc func(ctx context.Context, joinRequest *models.WSAuthMessage) (*models.ConnectedEvent, error)
+
+	// DisconnectedFunc mocks the Disconnected method.
+	DisconnectedFunc func() <-chan struct{}
 
 	// FastJoinCallFunc mocks the FastJoinCall method.
 	FastJoinCallFunc func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error)
@@ -87,6 +93,9 @@ type CoordinatorClientInterfaceMock struct {
 			// JoinCallRequest is the joinCallRequest argument value.
 			JoinCallRequest models.JoinCallRequest
 		}
+		// Disconnected holds details about calls to the Disconnected method.
+		Disconnected []struct {
+		}
 		// GetInterceptor holds details about calls to the GetInterceptor method.
 		GetInterceptor []struct {
 		}
@@ -115,6 +124,7 @@ type CoordinatorClientInterfaceMock struct {
 	}
 	lockClose          sync.RWMutex
 	lockConnect        sync.RWMutex
+	lockDisconnected   sync.RWMutex
 	lockFastJoinCall   sync.RWMutex
 	lockGetInterceptor sync.RWMutex
 	lockJoinCall       sync.RWMutex
@@ -225,6 +235,33 @@ func (mock *CoordinatorClientInterfaceMock) FastJoinCallCalls() []struct {
 	mock.lockFastJoinCall.RLock()
 	calls = mock.calls.FastJoinCall
 	mock.lockFastJoinCall.RUnlock()
+	return calls
+}
+
+// Disconnected calls DisconnectedFunc.
+func (mock *CoordinatorClientInterfaceMock) Disconnected() <-chan struct{} {
+	if mock.DisconnectedFunc == nil {
+		panic("CoordinatorClientInterfaceMock.DisconnectedFunc: method is nil but CoordinatorClientInterface.Disconnected was just called")
+	}
+	callInfo := struct {
+	}{}
+	mock.lockDisconnected.Lock()
+	mock.calls.Disconnected = append(mock.calls.Disconnected, callInfo)
+	mock.lockDisconnected.Unlock()
+	return mock.DisconnectedFunc()
+}
+
+// DisconnectedCalls gets all the calls that were made to Disconnected.
+// Check the length with:
+//
+//	len(mockedCoordinatorClientInterface.DisconnectedCalls())
+func (mock *CoordinatorClientInterfaceMock) DisconnectedCalls() []struct {
+} {
+	var calls []struct {
+	}
+	mock.lockDisconnected.RLock()
+	calls = mock.calls.Disconnected
+	mock.lockDisconnected.RUnlock()
 	return calls
 }
 
