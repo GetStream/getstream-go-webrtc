@@ -791,15 +791,16 @@ func (c *Call) UseSFU(cred models.Credentials) {
 func (c *Call) SetCredentials(cred models.Credentials) {
 	// The token and the TURN passwords are credentials: never log them.
 	c.logger.Debugf("setting credentials for %s (%s)", cred.Server.EdgeName, cred.Server.URL)
-	state := c.coordinatorState.Load()
-	if state == nil {
-		state = &CallState{}
+	// A stored state is shared with its readers: store a changed copy.
+	var next CallState
+	if state := c.coordinatorState.Load(); state != nil {
+		next = *state
 	}
-	state.EdgeName = cred.Server.EdgeName
-	state.WebsocketUrl = cred.Server.WsEndpoint
-	state.Token = cred.Token
-	state.Url = cred.Server.URL
-	c.coordinatorState.Store(state)
+	next.EdgeName = cred.Server.EdgeName
+	next.WebsocketUrl = cred.Server.WsEndpoint
+	next.Token = cred.Token
+	next.Url = cred.Server.URL
+	c.coordinatorState.Store(&next)
 	c.cred.Store(&cred)
 	c.Client().SetCredentials(cred)
 }
