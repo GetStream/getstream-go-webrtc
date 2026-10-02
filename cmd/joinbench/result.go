@@ -42,6 +42,8 @@ type runResult struct {
 	AudioSlots *uint `json:"audio_slots,omitempty"`
 	// ICEPolicy is -ice-policy when it is not all.
 	ICEPolicy string `json:"ice_policy,omitempty"`
+	// NewUsers is -new-users: both users joined for the first time.
+	NewUsers bool `json:"new_users,omitempty"`
 
 	// RTTc and RTTs are the measured round trips to the coordinator and the SFU,
 	// averaged over the run's traces; RTTudp the media path's.
