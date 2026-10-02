@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"math/rand/v2"
 	"net/http"
 	"slices"
 	"sync"
@@ -268,8 +269,9 @@ type User struct {
 	Type UserType
 }
 
-// TokenProvider returns a Stream JWT for the given user ID. It is called once
-// when the Client is constructed.
+// TokenProvider returns a Stream JWT for the given user ID. It is called when the
+// Client is constructed, and again when the coordinator refuses the token as expired
+// while the websocket reconnects.
 type TokenProvider = coordinator.TokenProvider
 
 // StaticToken returns a TokenProvider that always yields token.
@@ -291,9 +293,22 @@ type Client struct {
 	muStats      sync.RWMutex
 
 	// wsReady is closed when the coordinator websocket NewClient started in the
-	// background has connected or given up; ConnectionID is empty in the latter case.
+	// background has first connected, or failed to within the connect timeout;
+	// ConnectionID is empty in the latter case. It keeps reconnecting until Close,
+	// which ends wsCtx and waits for wsDone.
 	wsReady  chan struct{}
+	wsCtx    context.Context
 	wsCancel context.CancelFunc
+	wsDone   chan struct{}
+	// tokenProvider renews the token when the websocket's is refused as expired.
+	tokenProvider TokenProvider
+
+	// watched holds the joined calls whose events the coordinator websocket gets, by
+	// cid. Each is watched on every new connection, until its context ends. watchMu
+	// also orders a call's registration against ConnectionID changes, so each call is
+	// watched once per connection.
+	watchMu sync.Mutex
+	watched map[string]*watchedCall
 
 	// connectTrace holds the coordinator websocket's spans once it is up. The first
 	// join claims them into connectClaim, whichever of the two comes first: later joins
@@ -314,10 +329,12 @@ type Client struct {
 	warm *warmer
 }
 
-// Close closes the coordinator connections and any idle SFU connection.
+// Close closes the coordinator connections and any idle SFU connection. The
+// coordinator websocket stops reconnecting before Close returns.
 func (c *Client) Close() error {
 	if c.wsCancel != nil {
 		c.wsCancel()
+		<-c.wsDone
 	}
 	if c.warm != nil {
 		c.warm.close()
@@ -425,20 +442,78 @@ func (c *Client) awaitWS(ctx context.Context) bool {
 	}
 }
 
-// watchCall subscribes the coordinator websocket to the call's events once it is up.
-// Events sent before that are not delivered; the SFU's arrive on the SFU websocket.
+type watchedCall struct {
+	ctx      context.Context
+	callType string
+	id       string
+}
+
+// watchCall subscribes the coordinator websocket to the call's events, now if it is
+// up, and again on every reconnect, until ctx ends. Events sent while no connection
+// is subscribed are not delivered; the SFU's arrive on the SFU websocket.
 func (c *Client) watchCall(ctx context.Context, callType, id string) {
 	if !c.withCoordinatorWS {
 		return
 	}
-	go func() {
-		if !c.awaitWS(ctx) {
+	cid := callType + ":" + id
+	w := &watchedCall{ctx: ctx, callType: callType, id: id}
+	c.watchMu.Lock()
+	c.watched[cid] = w
+	connectionID := c.ConnectionID.Load()
+	c.watchMu.Unlock()
+	context.AfterFunc(ctx, func() {
+		c.watchMu.Lock()
+		defer c.watchMu.Unlock()
+		if c.watched[cid] == w {
+			delete(c.watched, cid)
+		}
+	})
+	if connectionID != "" {
+		go c.watch(w, connectionID)
+	}
+}
+
+// wsConnected makes connectionID the websocket's and subscribes it to every watched call.
+func (c *Client) wsConnected(connectionID string) {
+	c.watchMu.Lock()
+	c.ConnectionID.Store(connectionID)
+	calls := make([]*watchedCall, 0, len(c.watched))
+	for _, w := range c.watched {
+		calls = append(calls, w)
+	}
+	c.watchMu.Unlock()
+	for _, w := range calls {
+		go c.watch(w, connectionID)
+	}
+}
+
+func (c *Client) wsDisconnected() {
+	c.watchMu.Lock()
+	c.ConnectionID.Store("")
+	c.watchMu.Unlock()
+}
+
+// watch subscribes connectionID to w's events. Like the JS SDK's rewatch, it tries
+// three times, while neither the call nor the client is closed and the connection is
+// still the client's.
+func (c *Client) watch(w *watchedCall, connectionID string) {
+	ctx, cancel := context.WithCancel(w.ctx)
+	defer cancel()
+	defer context.AfterFunc(c.wsCtx, cancel)()
+	const attempts = 3
+	for attempt := 1; ; attempt++ {
+		err := c.WatchCall(ctx, w.callType, w.id, connectionID)
+		if err == nil || ctx.Err() != nil || c.ConnectionID.Load() != connectionID {
 			return
 		}
-		if err := c.WatchCall(ctx, callType, id, c.ConnectionID.Load()); err != nil && ctx.Err() == nil {
-			c.logger.Warnf("coordinator websocket gets no events for call %s:%s: %v", callType, id, err)
+		if attempt == attempts || !coordinator.IsRetryableError(err) {
+			c.logger.Warnf("coordinator websocket gets no events for call %s:%s: %v", w.callType, w.id, err)
+			return
 		}
-	}()
+		if !sleepCtx(ctx, wsRetryInterval(attempt)) {
+			return
+		}
+	}
 }
 
 func defaultClientOptions() options {
@@ -593,11 +668,13 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	}
 
 	c := &Client{
-		User:      user,
-		UserID:    userID,
-		apiKey:    apiKey,
-		options:   o,
-		transport: newHTTPTransport(o.networkDelay),
+		User:          user,
+		UserID:        userID,
+		apiKey:        apiKey,
+		options:       o,
+		transport:     newHTTPTransport(o.networkDelay),
+		tokenProvider: token,
+		watched:       map[string]*watchedCall{},
 	}
 	// This will be the general Tracer for the SDK client, unrelated to connections and PCs
 	if c.StatsReportingInterval() > 0 {
@@ -644,35 +721,150 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 			},
 			Token: tok,
 		}
-		ctx, cancel := context.WithCancel(context.Background())
-		c.wsCancel = cancel
-		go c.connectWS(ctx, &auth)
+		c.wsCtx, c.wsCancel = context.WithCancel(context.Background())
+		c.wsDone = make(chan struct{})
+		go c.keepWSConnected(c.wsCtx, &auth)
 	} else {
 		close(c.wsReady)
 	}
 	return c, nil
 }
 
-// connectWS connects the coordinator websocket, within the connect timeout, and
-// records its dial and auth as spans of their own that no join step waits for.
-func (c *Client) connectWS(ctx context.Context, auth *models.WSAuthMessage) {
+// keepWSConnected keeps the coordinator websocket connected until ctx ends: it
+// connects, waits for the connection to go, and reconnects after a jittered backoff,
+// authenticating each new connection and watching the joined calls on it. It gives up
+// only when the coordinator refuses the user for good. Joins never wait for it.
+func (c *Client) keepWSConnected(ctx context.Context, auth *models.WSAuthMessage) {
+	defer close(c.wsDone)
+	err := c.connectWS(ctx, auth)
+	failures := 0
+	for {
+		if err == nil {
+			failures = 0
+			select {
+			case <-c.CoordinatorClientInterface.Disconnected():
+			case <-ctx.Done():
+				return
+			}
+			c.wsDisconnected()
+			if ctx.Err() != nil {
+				return
+			}
+			c.logger.Warn("coordinator websocket disconnected, reconnecting")
+		} else if ctx.Err() != nil {
+			return
+		} else if coordinator.IsTokenExpired(err) {
+			if again, err := c.renewToken(auth); again {
+				c.logger.Error("coordinator websocket stays down: the token provider returned the expired token again")
+				return
+			} else if err != nil {
+				c.logger.Warn("coordinator websocket: cannot renew the expired token, retrying", err)
+			}
+		} else if !coordinator.IsRetryableError(err) {
+			c.logger.Error("coordinator websocket refused, not reconnecting: no coordinator events", err)
+			return
+		} else {
+			c.logger.Warn("coordinator websocket did not connect, retrying", err)
+		}
+		failures++
+		if !sleepCtx(ctx, wsRetryInterval(failures)) {
+			return
+		}
+		err = c.reconnectWS(ctx, auth)
+	}
+}
+
+// renewToken asks the token provider for a new token, for the websocket and the
+// coordinator requests. again reports that it returned the expired one, as a static
+// token does.
+func (c *Client) renewToken(auth *models.WSAuthMessage) (again bool, err error) {
+	tok, err := c.tokenProvider(c.User.ID)
+	if err != nil {
+		return false, xerr.Wrapf(err, "get token for user %q", c.User.ID)
+	}
+	if tok == auth.Token {
+		return true, nil
+	}
+	auth.Token = tok
+	c.token.Store(tok)
+	if s, ok := c.CoordinatorClientInterface.(interface{ SetToken(string) }); ok {
+		s.SetToken(tok)
+	}
+	return false, nil
+}
+
+// reconnectWS opens a new coordinator websocket, within the connect timeout.
+func (c *Client) reconnectWS(ctx context.Context, auth *models.WSAuthMessage) error {
+	connectCtx, cancel := context.WithTimeout(ctx, c.connectTimeout)
+	defer cancel()
+	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, redacted(auth))
+	resp, err := c.CoordinatorClientInterface.Connect(connectCtx, auth)
+	if err != nil {
+		return err
+	}
+	c.wsUp(ctx, resp)
+	return nil
+}
+
+// wsUp publishes a new connection, unless the client was closed while it opened.
+func (c *Client) wsUp(ctx context.Context, resp *models.ConnectedEvent) {
+	if ctx.Err() != nil {
+		_ = c.CoordinatorClientInterface.Close()
+		return
+	}
+	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
+	c.OwnUser.Store(&resp.Me)
+	c.wsConnected(resp.ConnectionID)
+}
+
+// redacted is auth without its token, for the trace.
+func redacted(auth *models.WSAuthMessage) models.WSAuthMessage {
+	r := *auth
+	r.Token = ""
+	return r
+}
+
+// wsRetryInterval is how long to wait before reconnect attempt n, from 1: a random
+// time between 0.25 and 2.5 s at first, growing by 2 s a failure up to 5 s, so clients
+// a coordinator dropped together come back spread out. It is the JS SDK's retryInterval.
+func wsRetryInterval(failures int) time.Duration {
+	hi := min(500+failures*2000, 5000)
+	lo := min(max(250, (failures-1)*2000), 5000)
+	return time.Duration(lo+rand.IntN(hi-lo+1)) * time.Millisecond
+}
+
+// sleepCtx waits for d, or less if ctx ends first; it reports whether d passed.
+func sleepCtx(ctx context.Context, d time.Duration) bool {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// connectWS connects the coordinator websocket the first time, within the connect
+// timeout, and records its dial and auth as spans of their own that no join step
+// waits for.
+func (c *Client) connectWS(ctx context.Context, auth *models.WSAuthMessage) error {
 	defer close(c.wsReady)
-	ctx, cancel := context.WithTimeout(ctx, c.connectTimeout)
+	connectCtx, cancel := context.WithTimeout(ctx, c.connectTimeout)
 	defer cancel()
 
-	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, *auth)
+	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectEvent, redacted(auth))
 	rec := jointrace.NewRecorder(time.Now())
-	dialCtx := jointrace.WithStep(ctx, rec, jointrace.CoordWSDial, jointrace.PeerCoordinator)
+	dialCtx := jointrace.WithStep(connectCtx, rec, jointrace.CoordWSDial, jointrace.PeerCoordinator)
 	start := time.Now()
 	resp, err := connectWsWithRetries(dialCtx, c.CoordinatorClientInterface, auth)
 	if err != nil {
-		c.logger.Error("coordinator websocket did not connect: no coordinator events", err)
-		return
+		return err
 	}
 	if ctx.Err() != nil {
 		// Closed while the auth reply was in flight.
 		_ = c.CoordinatorClientInterface.Close()
-		return
+		return ctx.Err()
 	}
 	// The upgrade response is the first byte back; the auth exchange follows it.
 	upgraded := jointrace.FirstByte(dialCtx)
@@ -699,10 +891,9 @@ func (c *Client) connectWS(ctx context.Context, auth *models.WSAuthMessage) {
 		}
 	}
 	rec.ReplaceRTT(jointrace.PeerCoordinator, rtt)
-	c.Tracing.Load().Emit(rtcstats.CoordinatorWSConnectedEvent, resp)
-	c.OwnUser.Store(&resp.Me)
-	c.ConnectionID.Store(resp.ConnectionID)
+	c.wsUp(ctx, resp)
 	c.connected(rec)
+	return nil
 }
 
 // Server returns the embedded server-side SDK, or nil when the Client was built
@@ -862,7 +1053,9 @@ func connectWsWithRetries(
 		if !coordinator.IsRetryableError(err) {
 			return nil, xerr.Wrap(err)
 		}
-		time.Sleep(backoff)
+		if !sleepCtx(ctx, backoff) {
+			return nil, xerr.Wrap(lastError)
+		}
 		if backoff < 1200*time.Millisecond {
 			backoff *= 2
 			if backoff > 1200*time.Millisecond {
