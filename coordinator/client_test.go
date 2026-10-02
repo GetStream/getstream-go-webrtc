@@ -249,6 +249,28 @@ func TestIsUnknownUserIsOnlyTheUser(t *testing.T) {
 	require.False(t, coordinator.IsUnknownUser(io.EOF))
 }
 
+func TestIsRefusal(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"blocked in the call": {err: &coordinator.Error{Code: 17, Status: http.StatusForbidden, Message: `FastJoinCall failed with error: "You cannot access call default:x, your user was blocked."`}, want: true},
+		"token revoked":       {err: &coordinator.Error{Code: 40, Status: http.StatusUnauthorized, Message: "This token has been revoked, please generate a new token"}, want: false},
+		"bad signature":       {err: &coordinator.Error{Code: 43, Status: http.StatusUnauthorized, Message: "signature is invalid"}, want: true},
+		"deactivated":         {err: &coordinator.Error{Code: 16, Status: http.StatusNotFound, Message: `FastJoinCall failed with error: "the user thierry was deactivated"`}, want: true},
+		"deleted":             {err: &coordinator.Error{Code: 16, Status: http.StatusNotFound, Message: `FastJoinCall failed with error: "the user thierry was deleted"`}, want: true},
+		"unknown user":        {err: &coordinator.Error{Code: 16, Status: http.StatusNotFound, Message: `FastJoinCall failed with error: "the user thierry does not exist"`}, want: false},
+		"no fast_join":        {err: &coordinator.Error{Code: 16, Status: http.StatusNotFound, Message: "not found"}, want: false},
+		"call not found":      {err: &coordinator.Error{Code: 16, Status: http.StatusNotFound, Message: `GetCall failed with error: "Can't find call with id default:x"`}, want: false},
+		"server error":        {err: &coordinator.Error{Code: 0, Status: http.StatusInternalServerError, Message: "boom", ShouldRetry: true}, want: false},
+		"network":             {err: io.EOF, want: false},
+	} {
+		require.Equal(t, tc.want, coordinator.IsRefusal(tc.err), name)
+	}
+}
+
 // WatchCall is GetCall with the websocket's connection id: what subscribes the
 // connection to the call's events.
 func TestWatchCallRequestPath(t *testing.T) {

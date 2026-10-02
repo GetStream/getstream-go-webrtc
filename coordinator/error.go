@@ -56,6 +56,28 @@ func IsUnknownUser(err error) bool {
 	return ok && strings.HasSuffix(rest, ` does not exist"`)
 }
 
+// IsRefusal reports whether err is the coordinator refusing the user or their token for
+// good: a 401 or 403, or a 404 for a user that was deleted or deactivated. Asking again,
+// on either join flow, is refused the same way. Code 40, an expired or revoked token, is
+// left out: a new token from the token provider can change the answer.
+func IsRefusal(err error) bool {
+	coordErr := &Error{}
+	if !errors.As(err, &coordErr) {
+		return false
+	}
+	switch coordErr.Status {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return coordErr.Code != tokenExpired
+	case http.StatusNotFound:
+		if coordErr.Code != notFound {
+			return false
+		}
+		_, rest, ok := strings.Cut(coordErr.Message, `"the user `)
+		return ok && (strings.HasSuffix(rest, ` was deleted"`) || strings.HasSuffix(rest, ` was deactivated"`))
+	}
+	return false
+}
+
 // IsNotFound reports whether err is an HTTP 404: for an endpoint, that the coordinator
 // or an edge in front of it does not have it.
 func IsNotFound(err error) bool {
