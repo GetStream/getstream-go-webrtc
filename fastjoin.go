@@ -77,6 +77,11 @@ const (
 	// fastAttachTimeout bounds the websocket attach. The SFU drops a fast-joined
 	// participant whose websocket has not attached after 10 s.
 	fastAttachTimeout = 10 * time.Second
+	// fastJoinCandidateTimeout bounds the FastJoin to a candidate that has another one
+	// after it. It leaves room for a new TLS connection and the SFU creating the call
+	// at intercontinental round trips; the last candidate keeps the signal client's
+	// own timeout.
+	fastJoinCandidateTimeout = 2 * time.Second
 )
 
 // fastJoinLocal is what the fast join prepares on the client while fast_join is in
@@ -264,7 +269,7 @@ func (c *Call) joinCandidates(
 		req := c.fastJoinRequest(options, local, candidate)
 		breakFastJoinGrant(round.n, i, req)
 		attemptStart := time.Now()
-		resp, err := client.FastJoin(stepCtx, req)
+		resp, err := c.fastJoinCandidate(stepCtx, client, req, i < len(candidates)-1)
 		outcome, err := fastJoinOutcome(resp, err)
 		if outcome == fastJoinJoined {
 			note := ""
@@ -305,6 +310,19 @@ func (c *Call) joinCandidates(
 		return nil, fmt.Errorf("%w: no SFU has FastJoin: %w", errFastJoinUnavailable, errors.Join(errs...))
 	}
 	return nil, errors.Join(errs...)
+}
+
+// fastJoinCandidate sends the FastJoin, giving up after fastJoinCandidateTimeout when
+// there is another candidate to try.
+func (c *Call) fastJoinCandidate(
+	ctx context.Context, client *signal.Client, req *signal_rpc.FastJoinRequest, more bool,
+) (*signal_rpc.FastJoinResponse, error) {
+	if !more {
+		return client.FastJoin(ctx, req)
+	}
+	ctx, cancel := context.WithTimeout(ctx, fastJoinCandidateTimeout)
+	defer cancel()
+	return client.FastJoin(ctx, req)
 }
 
 func (c *Call) fastJoinRequest(options joinOptions, local fastJoinLocal, candidate models.SFUCandidate) *signal_rpc.FastJoinRequest {

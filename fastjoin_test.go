@@ -454,8 +454,34 @@ func TestFastJoinSkipsAnUnresponsiveSFU(t *testing.T) {
 	call := fastJoinCall(t, f, "skips-unresponsive")
 	start := time.Now()
 	require.NoError(t, joinFast(t, call))
-	t.Logf("joined the second candidate after %s", time.Since(start))
+	took := time.Since(start)
 	require.Equal(t, "sfu-fake-2", call.credentials().Server.EdgeName)
+	require.Len(t, f.fastJoins, 1)
+	require.GreaterOrEqual(t, took, fastJoinCandidateTimeout)
+	require.Less(t, took, fastJoinCandidateTimeout+2*time.Second, "the next candidate is tried after fastJoinCandidateTimeout")
+}
+
+// TestFastJoinWaitsLongerForTheLastCandidate: with no candidate after it, a slow SFU
+// is not cut off at fastJoinCandidateTimeout.
+func TestFastJoinWaitsLongerForTheLastCandidate(t *testing.T) {
+	t.Parallel()
+
+	slow := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: func(ctx context.Context, _ *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+			select {
+			case <-time.After(fastJoinCandidateTimeout + 500*time.Millisecond):
+				return &signal_rpc.FastJoinResponse{}, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		},
+	}))
+	t.Cleanup(slow.Close)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(slow)
+	call := fastJoinCall(t, f, "waits-for-last")
+	require.NoError(t, joinFast(t, call))
+	require.Equal(t, "sfu-fake-1", call.credentials().Server.EdgeName)
 	require.Len(t, f.fastJoins, 1)
 }
 
