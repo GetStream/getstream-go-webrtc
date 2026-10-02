@@ -102,3 +102,41 @@ func TestBreakFastJoinGrantsFallsBack(t *testing.T) {
 	require.Contains(t, fast.Note, "candidate 2 of 2, after ")
 	require.Empty(t, f.joins, "no legacy join")
 }
+
+// TestBreakFastJoinRoundsAsksAgain: with the first fast_join's grants all broken, every
+// candidate refuses, and the second fast_join's candidates, with intact grants, take the
+// client. Not parallel: BreakFastJoinRounds is process-wide.
+func TestBreakFastJoinRoundsAsksAgain(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	grants := make(chan string, 4)
+	sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: func(_ context.Context, req *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+			grants <- req.GetSetupGrant()
+			if err := verifyGrant(key, req.GetSetupGrant()); err != nil {
+				return &signal_rpc.FastJoinResponse{Error: &sfu_models.Error{
+					Code: sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, Message: "invalid setup grant",
+				}}, nil
+			}
+			return &signal_rpc.FastJoinResponse{}, nil
+		},
+	}))
+	t.Cleanup(sfu.Close)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(sfu)
+	candidates := *f.candidates.Load()
+	issued := signedGrant(t, key, "sfu-fake-1")
+	candidates[0].SetupGrant = issued
+	f.candidates.Store(&candidates)
+
+	BreakFastJoinRounds(1)
+	defer BreakFastJoinRounds(0)
+	call := fastJoinCall(t, f, "broken-round")
+	require.NoError(t, joinFast(t, call))
+
+	require.Equal(t, brokenGrant(issued), <-grants, "the first fast_join's grant, broken")
+	require.Equal(t, issued, <-grants, "the second fast_join's grant, intact")
+	require.Len(t, f.fastJoins, 2)
+	fast, _ := call.JoinTrace().Span(jointrace.SFUFastJoin)
+	require.Contains(t, fast.Note, "candidate 1 of 1 of fast_join 2, after ")
+}

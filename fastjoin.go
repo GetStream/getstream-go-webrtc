@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -173,27 +174,45 @@ func (c *Call) abandonFastJoin(rec *jointrace.Recorder) {
 	rec.Remove(jointrace.PCsCreate)
 }
 
-// fastJoinSFU joins the first candidate SFU that takes the client, asking the
-// coordinator for new candidates once if none does.
+// fastJoinSFU joins the first candidate SFU that takes the client. If none does, it
+// asks the coordinator for new candidates once, sending the SFUs that failed as
+// migrating_from_list: fast_join returns other SFUs first, and the same ones, with
+// new grants, when there are no others.
 func (c *Call) fastJoinSFU(
 	ctx context.Context, options joinOptions, local fastJoinLocal, coord *models.FastJoinCallResponse, rec *jointrace.Recorder,
 ) (*sfu_events.JoinResponse, error) {
 	var err error
+	var failed []string
+	start := time.Now()
 	for round := range fastJoinRounds {
 		if round > 0 {
-			if coord, err = c.cc.fastJoinCoordinator(ctx, c.Type, c.Id, options.coordinatorRequest(), nil); err != nil {
+			req := options.coordinatorRequest()
+			req.MigratingFromList = &failed
+			if coord, err = c.cc.fastJoinCoordinator(ctx, c.Type, c.Id, req, nil); err != nil {
 				return nil, err
 			}
 		}
 		c.applyFastJoinCoordinator(options, coord)
 		var resp *sfu_events.JoinResponse
-		resp, err = c.joinCandidates(ctx, options, local, coord.Candidates, rec)
+		resp, err = c.joinCandidates(ctx, options, local, fastJoinRound{n: round, start: start}, coord.Candidates, rec)
 		if err == nil || errors.Is(err, errFastJoinUnavailable) || errors.Is(err, errFastJoinFatal) || ctx.Err() != nil {
 			return resp, err
 		}
-		c.logger.WithField("err", err).Warn("no fast join candidate took the client")
+		for _, candidate := range coord.Candidates {
+			if !slices.Contains(failed, candidate.Server.EdgeName) {
+				failed = append(failed, candidate.Server.EdgeName)
+			}
+		}
+		c.logger.WithField("err", err).WithField("failed_sfus", failed).Warn("no fast join candidate took the client")
 	}
 	return nil, err
+}
+
+// fastJoinRound is which fast_join answer joinCandidates is trying, and when the
+// first one's candidates started.
+type fastJoinRound struct {
+	n     int
+	start time.Time
 }
 
 // applyFastJoinCoordinator records the call state fast_join returned, as joinCoordinator
@@ -220,14 +239,14 @@ var errFastJoinFatal = errors.New("fast join refused")
 // joinCandidates tries the candidates in order. What happens after a failed one
 // follows the SFU's error: see fastJoinOutcome.
 func (c *Call) joinCandidates(
-	ctx context.Context, options joinOptions, local fastJoinLocal, candidates []models.SFUCandidate, rec *jointrace.Recorder,
+	ctx context.Context, options joinOptions, local fastJoinLocal, round fastJoinRound, candidates []models.SFUCandidate, rec *jointrace.Recorder,
 ) (*sfu_events.JoinResponse, error) {
 	if len(candidates) == 0 {
 		return nil, xerr.Error("fast_join returned no SFU candidates")
 	}
 	var errs []error
 	unavailable := 0
-	start := time.Now()
+	start := round.start
 	for i, candidate := range candidates {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -243,15 +262,18 @@ func (c *Call) joinCandidates(
 		attach := c.dialAttach(client, attempt)
 		stepCtx := jointrace.WithStep(ctx, attempt, jointrace.SFUFastJoin, jointrace.PeerSFU)
 		req := c.fastJoinRequest(options, local, candidate)
-		breakFastJoinGrant(i, req)
+		breakFastJoinGrant(round.n, i, req)
 		attemptStart := time.Now()
 		resp, err := client.FastJoin(stepCtx, req)
 		outcome, err := fastJoinOutcome(resp, err)
 		if outcome == fastJoinJoined {
 			note := ""
-			if i > 0 {
-				note = fmt.Sprintf("candidate %d of %d, after %.1f ms on the ones before",
-					i+1, len(candidates), float64(attemptStart.Sub(start).Microseconds())/1000)
+			if i > 0 || round.n > 0 {
+				note = fmt.Sprintf("candidate %d of %d", i+1, len(candidates))
+				if round.n > 0 {
+					note += fmt.Sprintf(" of fast_join %d", round.n+1)
+				}
+				note += fmt.Sprintf(", after %.1f ms on the ones before", float64(attemptStart.Sub(start).Microseconds())/1000)
 			}
 			attempt.Add(jointrace.Span{
 				Name: jointrace.SFUFastJoin, After: []string{jointrace.CoordFastJoin, jointrace.PCsCreate},

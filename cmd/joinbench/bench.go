@@ -134,7 +134,7 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 		_ = j.call.Leave("joinbench: wrong flow")
 		return nil, fmt.Errorf("%s: asked for the %s flow, the join took %s", user, flow, got)
 	}
-	if b.cfg.BreakCandidates > 0 {
+	if b.cfg.BreakCandidates > 0 || b.cfg.BreakRounds > 0 {
 		if err := b.checkFallback(j); err != nil {
 			_ = j.call.Leave("joinbench: no fallback")
 			return nil, err
@@ -153,9 +153,17 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 }
 
 // checkFallback checks that a join whose first candidates got broken grants was taken
-// by the candidate after them, and not by the pinned SFU, which is the first.
+// by the candidate after them, and not by the pinned SFU, which is the first. With
+// -break-rounds, it checks that the second fast_join's candidates took it; which SFU
+// did is in the result, since the pinned one comes last only when there are others.
 func (b *bench) checkFallback(j *joined) error {
 	fast, _ := j.call.JoinTrace().Span(jointrace.SFUFastJoin)
+	if b.cfg.BreakRounds > 0 {
+		if want := fmt.Sprintf(" of fast_join %d,", b.cfg.BreakRounds+1); !strings.Contains(fast.Note, want) {
+			return fmt.Errorf("%s: want the join taken by a candidate%s sfu.fastjoin says %q", j.user, strings.TrimSuffix(want, ","), fast.Note)
+		}
+		return nil
+	}
 	if want := fmt.Sprintf("candidate %d of ", b.cfg.BreakCandidates+1); !strings.HasPrefix(fast.Note, want) {
 		return fmt.Errorf("%s: want the join taken by %s, sfu.fastjoin says %q", j.user, want+"N", fast.Note)
 	}
@@ -259,7 +267,7 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		StartedAt: time.Now().UTC().Format(time.RFC3339Nano),
 		CallID:    "joinbench-" + uuid.NewString()[:8],
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
-		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates,
+		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates, BrokenRounds: b.cfg.BreakRounds,
 		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay), GapMs: ms(b.cfg.Gap),
 	}
 	if b.cfg.Flow == flowFast {
