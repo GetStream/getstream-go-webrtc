@@ -132,7 +132,7 @@ func TestFastJoinCallRequestPath(t *testing.T) {
 
 	var path, auth string
 	var query url.Values
-	var body models.JoinCallRequest
+	var body models.FastJoinCallRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path, auth, query = r.URL.Path, r.Header.Get("authorization"), r.URL.Query()
 		raw, err := io.ReadAll(r.Body)
@@ -162,7 +162,10 @@ func TestFastJoinCallRequestPath(t *testing.T) {
 
 	client := newTestClient(t, coordinator.ApiURL(srv.URL),
 		coordinator.WithJoinQuery(map[string][]string{"sfu_id": {"sfu-2"}}))
-	resp, err := client.FastJoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{Location: "auto"})
+	name := "The User"
+	details := &models.ConnectUserDetailsRequest{ID: "the-user", Name: &name}
+	resp, err := client.FastJoinCall(context.Background(), "default", "the-call",
+		models.FastJoinCallRequest{JoinCallRequest: models.JoinCallRequest{Location: "auto"}, UserDetails: details})
 	require.NoError(t, err)
 
 	require.Equal(t, "/api/v2/video/call/default/the-call/fast_join", path)
@@ -170,6 +173,7 @@ func TestFastJoinCallRequestPath(t *testing.T) {
 	require.Equal(t, "sfu-2", query.Get("sfu_id"), "pinned like join")
 	require.NotContains(t, query, "connection_id")
 	require.Equal(t, "auto", body.Location)
+	require.Equal(t, details, body.UserDetails, "the websocket connect's user details")
 
 	require.Equal(t, "the-call", resp.Call.ID)
 	require.Len(t, resp.Candidates, 2)
@@ -191,7 +195,7 @@ func TestFastJoinCallNotFound(t *testing.T) {
 	defer srv.Close()
 
 	client := newTestClient(t, coordinator.ApiURL(srv.URL))
-	_, err := client.FastJoinCall(context.Background(), "default", "the-call", models.JoinCallRequest{})
+	_, err := client.FastJoinCall(context.Background(), "default", "the-call", models.FastJoinCallRequest{})
 	require.Error(t, err)
 	require.True(t, coordinator.IsNotFound(err))
 	require.False(t, coordinator.IsUnknownUser(err))
