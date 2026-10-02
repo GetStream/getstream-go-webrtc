@@ -26,7 +26,7 @@ func GetDummyCall(t testing.TB, userID string, withTracing bool, joinOpts ...Joi
 	require.NoError(t, err)
 
 	opts := []Option{
-		WithoutCoordinatorWS(),
+		WithoutCoordinatorWS(), WithoutKeepWarm(),
 	}
 	if withTracing {
 		opts = append(opts, WithStatsInterval(10*time.Second))
@@ -77,7 +77,7 @@ func getCallOnFakeSFU(t testing.TB, sfu *testutil.FakeSFU) *Call {
 	require.NoError(t, err)
 
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
-		WithoutCoordinatorWS())
+		WithoutCoordinatorWS(), WithoutKeepWarm())
 	require.NoError(t, err)
 
 	cred := models.Credentials{
@@ -133,7 +133,7 @@ func newFakeSFUCall(t testing.TB, sfu *testutil.FakeSFU, edgeName string) *Call 
 	require.NoError(t, err)
 
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
-		WithoutCoordinatorWS())
+		WithoutCoordinatorWS(), WithoutKeepWarm())
 	require.NoError(t, err)
 
 	cred := fakeSFUCredentials(sfu, edgeName, token.Token)
@@ -179,7 +179,7 @@ func newUnconnectedCall(t testing.TB) *Call {
 	require.NoError(t, err)
 
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
-		WithoutCoordinatorWS())
+		WithoutCoordinatorWS(), WithoutKeepWarm())
 	require.NoError(t, err)
 
 	cred := models.Credentials{

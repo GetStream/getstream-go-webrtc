@@ -259,6 +259,11 @@ func (c *Call) joinCandidates(
 			})
 			serverTimings(stepCtx, resp.GetServerTimings())
 			rec.Merge(attempt)
+			urls := make([]string, len(candidates))
+			for k, offered := range candidates {
+				urls[k] = offered.Server.URL
+			}
+			c.cc.keepSFUsWarm(urls, cred.Server.URL)
 			return c.fastJoined(options, local, resp, attach, rec)
 		}
 		attach.cancel()

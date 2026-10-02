@@ -46,6 +46,7 @@ type options struct {
 	logger        logger.ILogger
 	enableWs      bool
 	dial          func(ctx context.Context, network, addr string) (net.Conn, error)
+	transport     *http.Transport
 	joinQuery     url.Values
 }
 
@@ -90,6 +91,15 @@ func WithWsURL(wsURL string) Option {
 func WithDialContext(dial func(ctx context.Context, network, addr string) (net.Conn, error)) Option {
 	return func(o *options) {
 		o.dial = dial
+	}
+}
+
+// WithHTTPTransport sends the REST requests through t, which may be shared with other
+// clients so their connections are reused. WithDialContext then applies only to the
+// websocket: t dials on its own.
+func WithHTTPTransport(t *http.Transport) Option {
+	return func(o *options) {
+		o.transport = t
 	}
 }
 
@@ -193,11 +203,14 @@ func NewClient(apiKey, userID string, tokenProvider TokenProvider, handler Handl
 		c.wsclient = newWsClient(u.String(), c)
 	}
 
-	// A transport of its own: a new client starts cold, and its joins reuse only the
-	// connections it opened itself.
-	c.transport = http.DefaultTransport.(*http.Transport).Clone()
-	if o.dial != nil {
-		c.transport.DialContext = o.dial
+	c.transport = o.transport
+	if c.transport == nil {
+		// A transport of its own: a new client starts cold, and its joins reuse only the
+		// connections it opened itself.
+		c.transport = http.DefaultTransport.(*http.Transport).Clone()
+		if o.dial != nil {
+			c.transport.DialContext = o.dial
+		}
 	}
 	c.httpClient = &http.Client{
 		Timeout:   5 * time.Second,
@@ -275,43 +288,26 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// Warm sends the cheapest authenticated request there is, GET /hi, which the Stream edge
+// answers without the coordinator, so the client's connection to the edge is open, or
+// stays open, for the next join. Any answer will do.
+func (c *Client) Warm(ctx context.Context) error {
+	r, err := c.newRequest(ctx, http.MethodGet, "/hi", nil, nil, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(r)
+	if err != nil {
+		return xerr.Wrapf(err, "GET /hi")
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return resp.Body.Close()
+}
+
 func (c *Client) makeRequest(ctx context.Context, method, path string, pathParams, queryParams map[string]any, request, response any) error {
-	path = replaceTemplate(path, pathParams)
-	u, err := url.Parse(c.apiURL + path)
+	r, err := c.newRequest(ctx, method, path, pathParams, queryParams, request)
 	if err != nil {
-		return xerr.Wrapf(err, "parse url %q", c.apiURL+path)
-	}
-
-	q := u.Query()
-	for k, v := range queryParams {
-		q.Add(k, toString(v))
-	}
-
-	q.Add("api_key", c.apiKey)
-	q.Add("user_id", c.userID)
-	q.Add("stream-auth-type", "jwt")
-	u.RawQuery = q.Encode()
-
-	var body io.Reader
-	if request != nil {
-		b, err := json.Marshal(request)
-		if err != nil {
-			return xerr.Wrapf(err, "marshal request")
-		}
-		body = bytes.NewReader(b)
-	}
-
-	r, err := http.NewRequestWithContext(ctx, method, u.String(), body)
-	if err != nil {
-		return xerr.Wrapf(err, "build request")
-	}
-
-	// The coordinator expects the raw JWT, not a Bearer-prefixed one.
-	if token := c.token.Load(); token != nil {
-		r.Header.Set("authorization", *token)
-	}
-	if c.versionHeader != "" {
-		r.Header.Set("X-Stream-Client", c.versionHeader)
+		return err
 	}
 
 	resp, err := c.httpClient.Do(r)
@@ -333,6 +329,48 @@ func (c *Client) makeRequest(ctx context.Context, method, path string, pathParam
 		return NewError(0, fmt.Sprintf("decode response: %v", err), false)
 	}
 	return nil
+}
+
+// newRequest builds an authenticated request to the coordinator.
+func (c *Client) newRequest(ctx context.Context, method, path string, pathParams, queryParams map[string]any, request any) (*http.Request, error) {
+	path = replaceTemplate(path, pathParams)
+	u, err := url.Parse(c.apiURL + path)
+	if err != nil {
+		return nil, xerr.Wrapf(err, "parse url %q", c.apiURL+path)
+	}
+
+	q := u.Query()
+	for k, v := range queryParams {
+		q.Add(k, toString(v))
+	}
+
+	q.Add("api_key", c.apiKey)
+	q.Add("user_id", c.userID)
+	q.Add("stream-auth-type", "jwt")
+	u.RawQuery = q.Encode()
+
+	var body io.Reader
+	if request != nil {
+		b, err := json.Marshal(request)
+		if err != nil {
+			return nil, xerr.Wrapf(err, "marshal request")
+		}
+		body = bytes.NewReader(b)
+	}
+
+	r, err := http.NewRequestWithContext(ctx, method, u.String(), body)
+	if err != nil {
+		return nil, xerr.Wrapf(err, "build request")
+	}
+
+	// The coordinator expects the raw JWT, not a Bearer-prefixed one.
+	if token := c.token.Load(); token != nil {
+		r.Header.Set("authorization", *token)
+	}
+	if c.versionHeader != "" {
+		r.Header.Set("X-Stream-Client", c.versionHeader)
+	}
+	return r, nil
 }
 
 // statusError turns a non-2xx response into an Error carrying the coordinator's own error

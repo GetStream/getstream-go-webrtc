@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -66,6 +67,7 @@ type FakeSFU struct {
 	attached     chan struct{}
 	attachedOnce sync.Once
 	tls          bool
+	listener     func(net.Listener) net.Listener
 }
 
 // FakeSFUOption configures a FakeSFU. Options are applied before the server
@@ -93,6 +95,13 @@ func WithJoinHandler(handler func(*sfu_events.JoinRequest) *sfu_events.SfuEvent)
 func WithTLS() FakeSFUOption {
 	return func(f *FakeSFU) {
 		f.tls = true
+	}
+}
+
+// WithListener serves on wrap(l) instead of l, so a test can watch the connections.
+func WithListener(wrap func(l net.Listener) net.Listener) FakeSFUOption {
+	return func(f *FakeSFU) {
+		f.listener = wrap
 	}
 }
 
@@ -153,6 +162,9 @@ func NewFakeSFU(opts ...FakeSFUOption) *FakeSFU {
 	// are told apart by path.
 	mux := http.NewServeMux()
 	mux.HandleFunc(wsPath, f.serve)
+	// As the SFU's: the root, which a client requests to keep its connection open, is a
+	// 404 that needs no token.
+	mux.HandleFunc("GET /{$}", http.NotFound)
 	mux.Handle("/", f.recordAuthorization(sfu_signal_rpc.NewSignalServerServer(
 		&signalRPCService{f: f}, twirp.WithServerPathPrefix(""))))
 	if !f.noFastJoin {
@@ -160,6 +172,9 @@ func NewFakeSFU(opts ...FakeSFUOption) *FakeSFU {
 		mux.Handle(fastJoin.PathPrefix(), f.recordAuthorization(fastJoin))
 	}
 	f.srv = httptest.NewUnstartedServer(mux)
+	if f.listener != nil {
+		f.srv.Listener = f.listener(f.srv.Listener)
+	}
 	if f.tls {
 		f.srv.StartTLS()
 	} else {

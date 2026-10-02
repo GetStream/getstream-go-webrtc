@@ -260,7 +260,7 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		CallID:    "joinbench-" + uuid.NewString()[:8],
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
 		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates,
-		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay),
+		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay), GapMs: ms(b.cfg.Gap),
 	}
 	if b.cfg.Flow == flowFast {
 		slots := b.cfg.AudioSlots
@@ -423,6 +423,6 @@ func (b *bench) measure(mode, scenario string, cl *clients, run int) runResult {
 	defer cancel()
 	r := b.runOnce(ctx, mode, scenario, cl, run)
 	// Let the SFU see both leave before the next call.
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(b.cfg.Gap)
 	return r
 }

@@ -22,7 +22,7 @@ func TestUseSFUJoinsWithoutTheCoordinator(t *testing.T) {
 	token, err := testutil.GenerateToken("test-api-key", "test-api-secret", userID, time.Hour)
 	require.NoError(t, err)
 	client, err := NewClient(token.APIKey, User{ID: userID}, StaticToken(token.Token),
-		WithoutCoordinatorWS())
+		WithoutCoordinatorWS(), WithoutKeepWarm())
 	require.NoError(t, err)
 
 	call := client.Call(testutil.DefaultCallType, "direct-call")

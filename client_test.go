@@ -18,7 +18,7 @@ func TestNewRTCClient(t *testing.T) {
 		client, err := NewRTCClient("key", "secret",
 			WithUser(User{ID: "bot", Name: "Bot"}),
 			getstream.WithTimeout(10*time.Second),
-			WithoutCoordinatorWS(),
+			WithoutCoordinatorWS(), WithoutKeepWarm(),
 		)
 		require.NoError(t, err)
 
@@ -31,7 +31,7 @@ func TestNewRTCClient(t *testing.T) {
 	t.Run("defaults the user to agent", func(t *testing.T) {
 		t.Parallel()
 
-		client, err := NewRTCClient("key", "secret", WithoutCoordinatorWS())
+		client, err := NewRTCClient("key", "secret", WithoutCoordinatorWS(), WithoutKeepWarm())
 		require.NoError(t, err)
 		assert.Equal(t, User{ID: "agent", Name: "Agent"}, client.User)
 	})

@@ -3,6 +3,7 @@ package rtc
 import (
 	"context"
 	"net/http"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -59,6 +60,11 @@ type options struct {
 
 	// networkDelay is the round-trip time WithNetworkDelay adds to every connection.
 	networkDelay time.Duration
+
+	// keepWarm opens the coordinator connection in NewClient and keeps the client's
+	// connections open between joins with a request every keepWarmEvery.
+	keepWarm      bool
+	keepWarmEvery time.Duration
 }
 
 // WithNetworkDelay makes every connection the client opens behave as if it crossed a
@@ -301,9 +307,11 @@ type Client struct {
 	rttMu    sync.Mutex
 	knownRTT map[jointrace.Peer]time.Duration
 
-	// sfuTransport carries every call's SFU RPCs, so a later call to the same SFU
-	// reuses the connection an earlier one opened.
-	sfuTransport *http.Transport
+	// transport carries the coordinator requests and every call's SFU RPCs, so a later
+	// join reuses the connections an earlier one, or the warmer, opened.
+	transport *http.Transport
+	// warm keeps transport's connections open between joins; nil WithoutKeepWarm.
+	warm *warmer
 }
 
 // Close closes the coordinator connections and any idle SFU connection.
@@ -311,8 +319,11 @@ func (c *Client) Close() error {
 	if c.wsCancel != nil {
 		c.wsCancel()
 	}
-	if c.sfuTransport != nil {
-		c.sfuTransport.CloseIdleConnections()
+	if c.warm != nil {
+		c.warm.close()
+	}
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
 	}
 	return c.CoordinatorClientInterface.Close()
 }
@@ -333,6 +344,19 @@ func (c *Client) shareRTTs(rec *jointrace.Recorder) {
 		c.knownRTT[peer] = rtt
 	} else {
 		rec.SetRTT(peer, c.knownRTT[peer])
+	}
+}
+
+// warmedCoordinator keeps the round trip the warmer's fresh coordinator connection
+// measured, for joins that find the connection open, unless one is known already.
+func (c *Client) warmedCoordinator(rtt time.Duration) {
+	c.rttMu.Lock()
+	defer c.rttMu.Unlock()
+	if c.knownRTT == nil {
+		c.knownRTT = make(map[jointrace.Peer]time.Duration, 2)
+	}
+	if c.knownRTT[jointrace.PeerCoordinator] == 0 {
+		c.knownRTT[jointrace.PeerCoordinator] = rtt
 	}
 }
 
@@ -420,6 +444,8 @@ func (c *Client) watchCall(ctx context.Context, callType, id string) {
 func defaultClientOptions() options {
 	return options{
 		withCoordinatorWS: true,
+		keepWarm:          true,
+		keepWarmEvery:     keepWarmInterval,
 		logger:            logger.Noop{},
 		clientDetails: ClientDetails{
 			OSName: "linux",
@@ -567,21 +593,18 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	}
 
 	c := &Client{
-		User:         user,
-		UserID:       userID,
-		apiKey:       apiKey,
-		options:      o,
-		sfuTransport: http.DefaultTransport.(*http.Transport).Clone(),
-	}
-	if o.networkDelay > 0 {
-		c.sfuTransport.DialContext = netdelay.Dialer(o.networkDelay, nil)
+		User:      user,
+		UserID:    userID,
+		apiKey:    apiKey,
+		options:   o,
+		transport: newHTTPTransport(o.networkDelay),
 	}
 	// This will be the general Tracer for the SDK client, unrelated to connections and PCs
 	if c.StatsReportingInterval() > 0 {
 		c.Tracing.Store(rtcstats.NewClientTraceBuffer(""))
 	}
 
-	coordOptions := o.coordinatorOptions
+	coordOptions := append(slices.Clone(o.coordinatorOptions), coordinator.WithHTTPTransport(c.transport))
 	if !c.withCoordinatorWS {
 		coordOptions = append(coordOptions, coordinator.WithoutWebsocket())
 	}
@@ -601,6 +624,17 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	c.OwnUser.Store(&models.OwnUserResponse{})
 	c.CoordinatorClientInterface = cc
 	c.token.Store(tok)
+	if o.keepWarm {
+		warmCoordinator := func(ctx context.Context) error {
+			if w, ok := c.CoordinatorClientInterface.(interface{ Warm(context.Context) error }); ok {
+				return w.Warm(ctx)
+			}
+			return nil
+		}
+		c.warm = newWarmer(c.transport, warmCoordinator, o.keepWarmEvery, o.logger)
+		c.warm.onCoordinatorRTT = c.warmedCoordinator
+		c.warm.start()
+	}
 	c.wsReady = make(chan struct{})
 	if o.withCoordinatorWS {
 		auth := models.WSAuthMessage{
