@@ -152,7 +152,7 @@ type CoordinatorClientInterface interface {
 		ctx context.Context,
 		_type string,
 		id string,
-		joinCallRequest models.JoinCallRequest,
+		fastJoinCallRequest models.FastJoinCallRequest,
 	) (models.FastJoinCallResponse, error)
 
 	WatchCall(ctx context.Context, _type, id, connectionID string) error
@@ -269,7 +269,7 @@ func (c *Client) FastJoinCall(
 	ctx context.Context,
 	_type string,
 	id string,
-	joinCallRequest models.JoinCallRequest,
+	fastJoinCallRequest models.FastJoinCallRequest,
 ) (models.FastJoinCallResponse, error) {
 	var response models.FastJoinCallResponse
 	err := c.makeRequest(ctx, http.MethodPost, "/api/v2/video/call/{type}/{id}/fast_join",
@@ -277,7 +277,7 @@ func (c *Client) FastJoinCall(
 			"type": _type,
 			"id":   id,
 		},
-		c.joinQueryParams(), joinCallRequest, &response)
+		c.joinQueryParams(), fastJoinCallRequest, &response)
 	return response, xerr.Wrapf(err, "fast join call %s:%s", _type, id)
 }
 
