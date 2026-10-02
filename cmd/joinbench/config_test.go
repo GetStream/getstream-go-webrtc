@@ -20,7 +20,8 @@ func TestParseConfigDefaultsToTheLocalStack(t *testing.T) {
 	c, err := parseConfig(nil, localEnv, io.Discard)
 	require.NoError(t, err)
 	require.Equal(t, envLocal, c.Env)
-	require.Equal(t, flowLegacy, c.Flow)
+	require.Equal(t, flowFast, c.Flow)
+	require.Equal(t, icePolicyAll, c.ICEPolicy)
 	require.Equal(t, []string{modeCold, modeWarm}, c.Modes)
 	require.Equal(t, []string{scenarioPubSub}, c.Scenarios)
 	require.Equal(t, 100*time.Millisecond, c.RTT, "local runs inject the standard 100 ms")
@@ -38,7 +39,7 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 	c, err := parseConfig([]string{
 		"-mode", "warm", "-scenario", "pubsub, one-to-one", "-rtt", "0", "-runs", "3",
 		"-sfu", "sfu-2", "-location", "AMS", "-budget", "4", "-out", "x.jsonl",
-		"-second-join-delay", "2s", "-audio-slots", "0", "-gap", "3m",
+		"-second-join-delay", "2s", "-audio-slots", "0", "-gap", "3m", "-flow", "legacy", "-ice-policy", "relay",
 	}, env(map[string]string{
 		"STREAM_BASE_URL": "http://127.0.0.1:4030", "STREAM_WS_URL": "ws://127.0.0.1:4800/api/v2/connect",
 		"STREAM_API_KEY": "key", "STREAM_API_SECRET": "secret",
@@ -46,6 +47,8 @@ func TestParseConfigReadsTheFlags(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []string{modeWarm}, c.Modes)
 	require.Equal(t, []string{scenarioPubSub, scenarioOneToOne}, c.Scenarios)
+	require.Equal(t, flowLegacy, c.Flow)
+	require.Equal(t, icePolicyRelay, c.ICEPolicy)
 	require.Zero(t, c.RTT, "an explicit 0 turns the delay off")
 	require.Equal(t, 3, c.Runs)
 	require.Equal(t, "AMS", c.Location)
@@ -87,6 +90,7 @@ func TestParseConfigRejects(t *testing.T) {
 		want string
 	}{
 		"unknown flow":     {[]string{"-flow", "quick"}, localEnv, "want legacy or fast"},
+		"unknown policy":   {[]string{"-ice-policy", "host"}, localEnv, "want all or relay"},
 		"unknown mode":     {[]string{"-mode", "cold,hot"}, localEnv, `"hot"`},
 		"unknown scenario": {[]string{"-scenario", "mesh"}, localEnv, `"mesh"`},
 		"no runs":          {[]string{"-runs", "0"}, localEnv, "-runs"},

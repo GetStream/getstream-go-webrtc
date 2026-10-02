@@ -140,6 +140,10 @@ func newSubscriber(c *Call, s Subscriber, peerConfig pc.PeerConfig, beforeSendAn
 		c.firstRTP(false, dtls, at)
 	}))
 
+	if peerConfig.Config.ICEServers == nil {
+		peerConfig.Config.ICEServers = iceServers(c.credentials().IceServers)
+	}
+
 	sub.Tracing.Load().Emit(rtcstats.PeerCreateEvent, peerConfig.Config)
 
 	peerc, err := pc.NewPCTransport(pc.TransportParams{

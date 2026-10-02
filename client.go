@@ -971,6 +971,10 @@ func (c *Client) connectWithRetries(
 	})
 }
 
+// joinFlowAttempts bounds the coordinator joins that fail on the coordinator's side, such
+// as when it finds no SFU for the call: the backoff between them adds up to 1.5 s.
+const joinFlowAttempts = 5
+
 // retryJoin runs a coordinator join until it succeeds, retrying what IsRetryableError
 // allows with a backoff. A first-ever join of a user the coordinator does not know yet
 // waits once for the websocket, which is what creates the user.
@@ -983,6 +987,7 @@ func retryJoin[T any](
 	backoff := 100 * time.Millisecond
 	var lastError error
 	waitedForUser := false
+	flowFailures := 0
 
 	for {
 		select {
@@ -1009,11 +1014,18 @@ func retryJoin[T any](
 				continue
 			}
 		}
+		if coordinator.IsJoinFlowFailure(err) {
+			if flowFailures++; flowFailures == joinFlowAttempts {
+				return nil, xerr.Wrapf(err, "the coordinator could not complete the join in %d attempts", joinFlowAttempts)
+			}
+		}
 		if !coordinator.IsRetryableError(err) {
 			return nil, xerr.Wrap(err)
 		}
 
-		time.Sleep(backoff)
+		if !sleepCtx(ctx, backoff) {
+			return nil, xerr.Wrap(lastError)
+		}
 		// Exponential backoff with max of 1.2 seconds
 		if backoff < 1200*time.Millisecond {
 			backoff *= 2
@@ -1091,7 +1103,7 @@ func (c *Client) joinCoordinator(
 		note = "reused connection"
 	}
 	rec.Add(jointrace.Span{
-		Name:  jointrace.CoordJoin,
+		Name: jointrace.CoordJoin, After: afterFirst(rec, jointrace.FastJoinFallback),
 		Start: start, End: time.Now(), Kind: jointrace.KindNet, Peer: jointrace.PeerCoordinator, Note: note,
 	})
 	c.shareRTTs(rec)

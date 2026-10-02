@@ -67,8 +67,9 @@ const (
 	SFUWS            = "sfu.ws"
 	SubAnswer        = "sub.answer"
 	SubSFUCandidates = "sub.sfu.candidates"
-	PubICEDTLS       = "pub.ice+dtls"
-	SubICEDTLS       = "sub.ice+dtls"
+	// FastJoinFallback is a fast join that did not work out, from its start to the
+	// legacy join that follows it. Its note is why.
+	FastJoinFallback = "fastjoin.fallback"
 )
 
 // Suffixes of the detail spans a network step is split into. A detail span is named

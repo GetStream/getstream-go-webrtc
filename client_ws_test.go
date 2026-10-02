@@ -67,7 +67,34 @@ type fakeCoordinator struct {
 	// candidateLimit, when set, is how many candidates fast_join returns, as the
 	// coordinator returns at most 5.
 	candidateLimit atomic.Int32
-	token          string
+	// fastJoinRefusal and joinRefusal, when set, are what fast_join and join answer
+	// instead; fastJoinRefused and joinRefused count those answers.
+	fastJoinRefusal, joinRefusal atomic.Pointer[httpAnswer]
+	fastJoinRefused, joinRefused atomic.Int32
+	// iceServers, when set, go with every candidate and join credential.
+	iceServers atomic.Pointer[[]models.ICEServerResponse]
+	token      string
+}
+
+// httpAnswer is a canned HTTP response.
+type httpAnswer struct {
+	status int
+	body   string
+}
+
+// coordinatorRefusal is the coordinator's error response, its message wrapped in the
+// handler's name as the coordinator does.
+func coordinatorRefusal(status, code int, handler, message string) *httpAnswer {
+	body, _ := json.Marshal(map[string]any{
+		"code": code, "message": fmt.Sprintf("%s failed with error: %q", handler, message), "StatusCode": status,
+	})
+	return &httpAnswer{status: status, body: string(body)}
+}
+
+func (a *httpAnswer) write(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(a.status)
+	_, _ = w.Write([]byte(a.body))
 }
 
 // fastJoinCandidates is what fast_join returns for req: the candidates in order, those
@@ -88,6 +115,11 @@ func (f *fakeCoordinator) fastJoinCandidates(req models.JoinCallRequest) []model
 	all := append(first, last...)
 	if limit := int(f.candidateLimit.Load()); limit > 0 && len(all) > limit {
 		all = all[:limit]
+	}
+	if servers := f.iceServers.Load(); servers != nil {
+		for i := range all {
+			all[i].IceServers = *servers
+		}
 	}
 	return all
 }
@@ -218,14 +250,28 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		}
 	})
 	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/join", func(w http.ResponseWriter, r *http.Request) {
+		if refusal := f.joinRefusal.Load(); refusal != nil {
+			f.joinRefused.Add(1)
+			refusal.write(w)
+			return
+		}
 		f.joins <- r.URL.Query()
 		w.Header().Set("Content-Type", "application/json")
 		if unknownUser(w) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: fakeSFUCredentials(f.sfu, "sfu-fake", token.Token)})
+		cred := fakeSFUCredentials(f.sfu, "sfu-fake", token.Token)
+		if servers := f.iceServers.Load(); servers != nil {
+			cred.IceServers = *servers
+		}
+		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: cred})
 	})
 	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/fast_join", func(w http.ResponseWriter, r *http.Request) {
+		if refusal := f.fastJoinRefusal.Load(); refusal != nil {
+			f.fastJoinRefused.Add(1)
+			refusal.write(w)
+			return
+		}
 		if f.candidates.Load() == nil {
 			http.NotFound(w, r)
 			return

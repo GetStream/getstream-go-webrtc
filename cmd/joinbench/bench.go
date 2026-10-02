@@ -22,6 +22,7 @@ import (
 	"github.com/GetStream/getstream-go-webrtc/coordinator"
 	"github.com/GetStream/getstream-go-webrtc/jointrace"
 	"github.com/GetStream/getstream-go-webrtc/logger"
+	"github.com/GetStream/getstream-go-webrtc/pc"
 	"github.com/GetStream/getstream-go-webrtc/track"
 )
 
@@ -112,6 +113,10 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 	if b.cfg.Location != "" {
 		opts = append(opts, rtc.WithLocation(b.cfg.Location))
 	}
+	if b.cfg.ICEPolicy == icePolicyRelay {
+		relay := pc.PeerConfig{Config: webrtc.Configuration{ICETransportPolicy: webrtc.ICETransportPolicyRelay}}
+		opts = append(opts, rtc.WithPublisherPeerConfiguration(relay), rtc.WithSubscriberPeerConfiguration(relay))
+	}
 	var info *sfu_models.TrackInfo
 	var audio webrtc.TrackLocal
 	if publish {
@@ -130,9 +135,17 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 	if j.resp, err = j.call.Join(ctx, opts...); err != nil {
 		return nil, fmt.Errorf("%s join: %w", user, err)
 	}
-	if got := j.call.JoinFlow(); got != flow {
+	want := flow
+	if b.cfg.BreakRounds == 2 {
+		want = rtc.JoinFlowLegacy
+	}
+	if got := j.call.JoinFlow(); got != want {
 		_ = j.call.Leave("joinbench: wrong flow")
-		return nil, fmt.Errorf("%s: asked for the %s flow, the join took %s", user, flow, got)
+		err := fmt.Errorf("%s: asked for the %s flow, want %s, the join took %s", user, flow, want, got)
+		if fallback, ok := j.call.JoinTrace().Span(jointrace.FastJoinFallback); ok {
+			err = fmt.Errorf("%w, because: %s", err, fallback.Note)
+		}
+		return nil, err
 	}
 	if b.cfg.BreakCandidates > 0 || b.cfg.BreakRounds > 0 {
 		if err := b.checkFallback(j); err != nil {
@@ -158,6 +171,13 @@ func (b *bench) join(ctx context.Context, client *rtc.Client, user, callID strin
 // did is in the result, since the pinned one comes last only when there are others.
 func (b *bench) checkFallback(j *joined) error {
 	fast, _ := j.call.JoinTrace().Span(jointrace.SFUFastJoin)
+	if b.cfg.BreakRounds == 2 {
+		fallback, ok := j.call.JoinTrace().Span(jointrace.FastJoinFallback)
+		if want := "no candidate took the client in 2 rounds"; !ok || !strings.Contains(fallback.Note, want) {
+			return fmt.Errorf("%s: want a %s span saying %q, got %q", j.user, jointrace.FastJoinFallback, want, fallback.Note)
+		}
+		return nil
+	}
 	if b.cfg.BreakRounds > 0 {
 		if want := fmt.Sprintf(" of fast_join %d,", b.cfg.BreakRounds+1); !strings.Contains(fast.Note, want) {
 			return fmt.Errorf("%s: want the join taken by a candidate%s sfu.fastjoin says %q", j.user, strings.TrimSuffix(want, ","), fast.Note)
@@ -269,6 +289,9 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
 		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates, BrokenRounds: b.cfg.BreakRounds,
 		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay), GapMs: ms(b.cfg.Gap),
+	}
+	if b.cfg.ICEPolicy != icePolicyAll {
+		r.ICEPolicy = b.cfg.ICEPolicy
 	}
 	if b.cfg.Flow == flowFast {
 		slots := b.cfg.AudioSlots
