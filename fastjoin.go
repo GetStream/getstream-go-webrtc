@@ -160,6 +160,9 @@ func (c *Call) fastJoin(ctx context.Context, opts []JoinOption, options joinOpti
 	}
 
 	c.abandonFastJoin(rec)
+	if coordinator.IsRefusal(err) && !errors.Is(err, ErrJoinRefused) {
+		return nil, fmt.Errorf("%w: %w", ErrJoinRefused, err)
+	}
 	if coordinator.IsFastJoinUnavailable(err) {
 		return nil, fmt.Errorf("%w: the coordinator does not serve fast_join: %w", errFastJoinUnavailable, err)
 	}
@@ -284,12 +287,13 @@ func (c *Call) applyFastJoinCoordinator(options joinOptions, resp *models.FastJo
 	c.coordinatorState.Store(state)
 }
 
-// ErrJoinRefused is what Join's error wraps when an SFU refused the client in a way no
-// other SFU would change, and Join stopped there: the coordinator revoked its credentials
-// because the user was kicked or blocked, it may not publish what it asked to, or the
-// call is full. Only a new Join, which asks the coordinator for new credentials, can get
-// the user in, if the coordinator lets it. A refusal by the coordinator itself is a
-// *coordinator.Error, as on the legacy join.
+// ErrJoinRefused is what a fast Join's error wraps when it stopped at a refusal that
+// asking again would not change. An SFU refused the client because the coordinator
+// revoked its credentials (the user was kicked or blocked), it may not publish what it
+// asked to, or the call is full. Or the coordinator refused the user or their token
+// (coordinator.IsRefusal), and the error also wraps that *coordinator.Error. Only a new
+// Join, which asks the coordinator for new credentials, can get the user in, if the
+// coordinator lets it.
 var ErrJoinRefused = errors.New("join refused")
 
 // joinCandidates tries the candidates in order. What happens after a failed one

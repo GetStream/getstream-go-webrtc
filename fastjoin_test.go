@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"sync/atomic"
 	"testing"
@@ -780,25 +781,39 @@ func TestFastJoinCoordinatorRefusalIsFinal(t *testing.T) {
 	t.Parallel()
 
 	for name, tc := range map[string]struct {
-		from   int32
-		status int
-		body   string
+		from    int32
+		status  int
+		body    string
+		refused bool
 	}{
 		"blocked in the call": {
 			from: 1, status: http.StatusForbidden,
-			body: `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+			body:    `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+			refused: true,
 		},
 		"banned": {
 			from: 1, status: http.StatusForbidden,
-			body: `{"code":17,"message":"Sorry, you do not have access to this feature. Your account is currently banned.","StatusCode":403}`,
+			body:    `{"code":17,"message":"Sorry, you do not have access to this feature. Your account is currently banned.","StatusCode":403}`,
+			refused: true,
 		},
 		"token revoked": {
 			from: 1, status: http.StatusUnauthorized,
-			body: `{"code":40,"message":"token has been revoked","StatusCode":401}`,
+			body: `{"code":40,"message":"This token has been revoked, please generate a new token","StatusCode":401}`,
+		},
+		"deactivated": {
+			from: 1, status: http.StatusNotFound,
+			body:    `{"code":16,"message":"FastJoinCall failed with error: \"the user fake-user was deactivated\"","StatusCode":404}`,
+			refused: true,
+		},
+		"deleted": {
+			from: 1, status: http.StatusNotFound,
+			body:    `{"code":16,"message":"FastJoinCall failed with error: \"the user fake-user was deleted\"","StatusCode":404}`,
+			refused: true,
 		},
 		"blocked after the session ended": {
 			from: 2, status: http.StatusForbidden,
-			body: `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+			body:    `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+			refused: true,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -818,6 +833,7 @@ func TestFastJoinCoordinatorRefusalIsFinal(t *testing.T) {
 			require.ErrorAs(t, err, &coordErr)
 			require.Equal(t, tc.status, coordErr.Status)
 			require.False(t, coordinator.IsRetryableError(err))
+			require.Equal(t, tc.refused, errors.Is(err, ErrJoinRefused), "a new token can change an expired or revoked one's answer")
 			require.EqualValues(t, 1, f.fastJoinRefused.Load(), "no fast_join after the refusal")
 			require.Len(t, f.fastJoins, int(tc.from)-1)
 			require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu), int(tc.from)-1)
