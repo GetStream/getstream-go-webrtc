@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/twitchtv/twirp"
 
+	"github.com/GetStream/getstream-go-webrtc/coordinator"
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
 	"github.com/GetStream/getstream-go-webrtc/jointrace"
@@ -384,18 +385,18 @@ func TestFastJoinTriesTheNextCandidate(t *testing.T) {
 }
 
 // fastJoinBody returns the body of the next fast_join f received.
-func fastJoinBody(t *testing.T, f *fakeCoordinator) models.JoinCallRequest {
+func fastJoinBody(t *testing.T, f *fakeCoordinator) models.FastJoinCallRequest {
 	t.Helper()
 	select {
 	case req := <-f.fastJoinBodies:
 		return req
 	default:
 		require.FailNow(t, "no fast_join body left")
-		return models.JoinCallRequest{}
+		return models.FastJoinCallRequest{}
 	}
 }
 
-func migratingFromList(req models.JoinCallRequest) []string {
+func migratingFromList(req models.FastJoinCallRequest) []string {
 	if req.MigratingFromList == nil {
 		return nil
 	}
@@ -707,8 +708,8 @@ func TestFastJoinDoesNotWaitForTheWebsocket(t *testing.T) {
 	require.True(t, attached)
 }
 
-// TestFastJoinUnknownUser: the coordinator knows a user only once its websocket is up,
-// on fast_join as on join.
+// TestFastJoinUnknownUser: a coordinator from before T44 knows a user only once its
+// websocket is up, on fast_join as on join.
 func TestFastJoinUnknownUser(t *testing.T) {
 	t.Parallel()
 
@@ -723,4 +724,54 @@ func TestFastJoinUnknownUser(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(started), wsDelay)
 	require.Equal(t, JoinFlowFast, call.JoinFlow(), "an unknown user is not a coordinator without fast_join")
 	require.Len(t, f.fastJoins, 2, "refused, then joined once the websocket is up")
+}
+
+// TestFastJoinCreatesAnUnknownUser: fast_join sends the websocket connect's user details,
+// from which the coordinator creates a user it has never seen, so a new user's first join
+// (an agent's usual one) does not wait for the websocket.
+func TestFastJoinCreatesAnUnknownUser(t *testing.T) {
+	t.Parallel()
+
+	const wsDelay = 2 * time.Second
+	sfu := testutil.NewFakeSFU()
+	t.Cleanup(sfu.Close)
+	f := newFakeCoordinator(t, wsDelay, true)
+	f.createsUsers.Store(true)
+	f.userName = "Vision Agent"
+	f.serveFastJoin(sfu)
+	started := time.Now()
+	call := fastJoinCall(t, f, "fast-new-user")
+	require.NoError(t, joinFast(t, call))
+	require.Less(t, time.Since(started), wsDelay, "no wait for the websocket")
+	require.Equal(t, JoinFlowFast, call.JoinFlow())
+	require.Len(t, f.fastJoins, 1)
+	require.Equal(t, &models.ConnectUserDetailsRequest{ID: "ws-user", Name: ptrTo("Vision Agent")}, fastJoinBody(t, f).UserDetails)
+}
+
+// TestFastJoinWithoutTheWebsocketOfAnUnknownUser: a client without the coordinator
+// websocket has nothing that creates its user but fast_join.
+func TestFastJoinWithoutTheWebsocketOfAnUnknownUser(t *testing.T) {
+	t.Parallel()
+
+	for name, createsUsers := range map[string]bool{"coordinator creates users": true, "older coordinator": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sfu := testutil.NewFakeSFU()
+			t.Cleanup(sfu.Close)
+			f := newFakeCoordinator(t, 0, true)
+			f.createsUsers.Store(createsUsers)
+			f.serveFastJoin(sfu)
+			call := fastJoinCall(t, f, "fast-new-user-no-ws", WithoutCoordinatorWS())
+			err := joinFast(t, call)
+			require.Zero(t, f.wsConnects.Load())
+			if !createsUsers {
+				require.True(t, coordinator.IsUnknownUser(err), "the join fails: %v", err)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, JoinFlowFast, call.JoinFlow())
+			require.Len(t, f.fastJoins, 1)
+		})
+	}
 }
