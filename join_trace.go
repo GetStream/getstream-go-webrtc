@@ -26,6 +26,9 @@ type joinTracer struct {
 	// fast is set when the first join takes the fast path, whose steps depend on each
 	// other differently.
 	fast bool
+	// publishAfterFast is set when that fast join publishes after its FastJoin, with a
+	// SetPublisher of its own: see publishAfterFastJoin.
+	publishAfterFast bool
 
 	// Moments the spans are built from that are not spans of their own.
 	pubSignalSent time.Time
@@ -66,16 +69,18 @@ func (j *joinTracer) markJoined() {
 	j.joined = true
 }
 
-func (j *joinTracer) setFast(fast bool) {
+func (j *joinTracer) setFast(fast, publishAfter bool) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.fast = fast
+	j.publishAfterFast = fast && publishAfter
 }
 
-func (j *joinTracer) isFast() bool {
+// isFast reports whether the first join took the fast path, and its publisher too.
+func (j *joinTracer) isFast(publisher bool) bool {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	return j.fast
+	return j.fast && !(publisher && j.publishAfterFast)
 }
 
 func (j *joinTracer) snapshot() jointrace.Trace {
@@ -134,13 +139,13 @@ func (c *Call) peerSpans(publisher bool, t pc.Timing) {
 	if rec == nil {
 		return
 	}
-	if c.trace.isFast() {
+	if c.trace.isFast(publisher) {
 		fastPeerSpans(rec, publisher, t)
 		return
 	}
 	if publisher {
 		rec.Add(jointrace.Span{
-			Name: jointrace.PubDebounce, After: []string{jointrace.SFUJoin},
+			Name: jointrace.PubDebounce, After: afterFirst(rec, jointrace.SFUJoin, jointrace.SFUFastJoin),
 			Start: t.NegotiationRequested, End: t.OfferStarted,
 			Kind: jointrace.KindTimer, Peer: jointrace.PeerLocal,
 		})

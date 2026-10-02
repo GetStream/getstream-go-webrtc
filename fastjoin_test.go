@@ -2,6 +2,7 @@ package rtc
 
 import (
 	"context"
+	"net/http"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -580,24 +581,142 @@ func TestFastJoinAsksForNewCandidatesOnce(t *testing.T) {
 		require.EqualValues(t, 2, calls.Load())
 	})
 
-	t.Run("gives up", func(t *testing.T) {
+	t.Run("then joins the legacy way", func(t *testing.T) {
 		t.Parallel()
 
 		sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
-			FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "bad token"),
+			FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "bad grant"),
 		}))
 		t.Cleanup(sfu.Close)
 		f := newFakeCoordinator(t, 0, false)
 		f.serveFastJoin(sfu)
 		call := fastJoinCall(t, f, "gives-up")
-		err := joinFast(t, call)
-		require.ErrorContains(t, err, "bad token")
+		require.NoError(t, joinFast(t, call))
 		require.Len(t, f.fastJoins, fastJoinRounds)
 		fastJoinBody(t, f)
 		require.Equal(t, []string{"sfu-fake-1"}, migratingFromList(fastJoinBody(t, f)), "the failed SFU, which is returned again")
 		require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu), fastJoinRounds)
-		require.Empty(t, f.joins, "a refused grant is not a reason for the legacy join")
+
+		require.Equal(t, JoinFlowLegacy, call.JoinFlow())
+		require.Len(t, f.joins, 1, "one legacy join")
+		join, err := testutil.NextRequestOf[*sfu_events.SfuRequest_JoinRequest](f.sfu, time.Second)
+		require.NoError(t, err)
+		require.False(t, join.JoinRequest.GetAttachFastJoin())
+		trace := call.JoinTrace()
+		fallback, ok := trace.Span(jointrace.FastJoinFallback)
+		require.True(t, ok, "no %s span", jointrace.FastJoinFallback)
+		require.Contains(t, fallback.Note, "no candidate took the client in 2 rounds")
+		require.Contains(t, fallback.Note, "bad grant")
+		require.Equal(t, jointrace.PeerSFU, fallback.Peer)
+		coord, _ := trace.Span(jointrace.CoordJoin)
+		require.Equal(t, []string{jointrace.FastJoinFallback}, coord.After)
+		require.False(t, coord.Start.Before(fallback.End))
+		_, ok = trace.Span(jointrace.SFUFastJoin)
+		require.False(t, ok)
 	})
+
+	t.Run("and the legacy join fails too", func(t *testing.T) {
+		t.Parallel()
+
+		sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+			FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "bad grant"),
+		}))
+		t.Cleanup(sfu.Close)
+		f := newFakeCoordinator(t, 0, false)
+		f.serveFastJoin(sfu)
+		f.joinRefusal.Store(coordinatorRefusal(http.StatusForbidden, 17, "JoinCall", "User 'ws-user' is blocked from the call"))
+		call := fastJoinCall(t, f, "legacy-refuses")
+		require.ErrorContains(t, joinFast(t, call), "is blocked from the call", "the legacy join's error")
+		require.EqualValues(t, 1, f.joinRefused.Load(), "one legacy join, not retried")
+		require.Len(t, f.fastJoins, fastJoinRounds)
+	})
+}
+
+// TestFastJoinFailsWithoutTheLegacyJoin: what the legacy join could not change ends the
+// join with the fast join's error.
+func TestFastJoinFailsWithoutTheLegacyJoin(t *testing.T) {
+	t.Parallel()
+
+	t.Run("cancelled", func(t *testing.T) {
+		t.Parallel()
+
+		hung := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+			FastJoin: func(ctx context.Context, _ *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}))
+		t.Cleanup(hung.Close)
+		f := newFakeCoordinator(t, 0, false)
+		f.serveFastJoin(hung)
+		call := fastJoinCall(t, f, "cancelled")
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := call.Join(ctx)
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.Empty(t, f.joins)
+		_, ok := call.JoinTrace().Span(jointrace.FastJoinFallback)
+		require.False(t, ok)
+	})
+
+	t.Run("call not found", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeCoordinator(t, 0, false)
+		f.fastJoinRefusal.Store(coordinatorRefusal(http.StatusNotFound, 16, "FastJoinCall", "Can't find call with id default:missing"))
+		call := fastJoinCall(t, f, "missing")
+		err := joinFast(t, call, WithoutCreate())
+		require.ErrorContains(t, err, "Can't find call with id default:missing")
+		require.EqualValues(t, 1, f.fastJoinRefused.Load())
+		require.Empty(t, f.joins, "a missing call is missing for the legacy join too")
+		require.EqualValues(t, 0, f.joinRefused.Load())
+	})
+
+	for name, refusal := range map[string]*httpAnswer{
+		"blocked":          coordinatorRefusal(http.StatusForbidden, 17, "FastJoinCall", "User 'ws-user' is blocked from the call"),
+		"deactivated user": coordinatorRefusal(http.StatusNotFound, 16, "FastJoinCall", "the user ws-user was deactivated"),
+		"deleted user":     coordinatorRefusal(http.StatusNotFound, 16, "FastJoinCall", "the user ws-user was deleted"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeCoordinator(t, 0, false)
+			f.fastJoinRefusal.Store(refusal)
+			call := fastJoinCall(t, f, "refused")
+			require.ErrorContains(t, joinFast(t, call), "FastJoinCall failed with error")
+			require.EqualValues(t, 1, f.fastJoinRefused.Load())
+			require.Empty(t, f.joins, "no legacy join to be refused again")
+		})
+	}
+}
+
+// TestJoinGivesUpWhenTheCoordinatorFindsNoSFU: code 101 is retried a few times on either
+// flow, then the join fails with the coordinator's message, well before its context.
+func TestJoinGivesUpWhenTheCoordinatorFindsNoSFU(t *testing.T) {
+	t.Parallel()
+
+	noSFU := coordinatorRefusal(http.StatusInternalServerError, 101, "FastJoinCall",
+		"could not find any available server for this call, try again")
+	for name, flow := range map[string]JoinFlow{"fast": JoinFlowFast, "legacy": JoinFlowLegacy} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeCoordinator(t, 0, false)
+			f.serveFastJoin(testutil.NewFakeSFU())
+			f.fastJoinRefusal.Store(noSFU)
+			f.joinRefusal.Store(noSFU)
+			call := fastJoinCall(t, f, "no-sfu-"+name)
+			start := time.Now()
+			err := joinFast(t, call, WithJoinFlow(flow))
+			require.ErrorContains(t, err, "could not complete the join in 5 attempts")
+			require.ErrorContains(t, err, "code: 101, status: 500")
+			require.ErrorContains(t, err, "could not find any available server")
+			require.NotContains(t, err.Error(), "ERROR_CODE_")
+			require.Less(t, time.Since(start), 5*time.Second)
+			attempts := f.fastJoinRefused.Load() + f.joinRefused.Load()
+			require.EqualValues(t, joinFlowAttempts, attempts, "a legacy join after a fast join without SFUs would find none either")
+		})
+	}
 }
 
 // TestFastJoinRefusedByTheCall: a full call is full on every SFU.
@@ -624,35 +743,62 @@ func TestFastJoinRefusedByTheCall(t *testing.T) {
 func TestFastJoinFallsBackToTheLegacyJoin(t *testing.T) {
 	t.Parallel()
 
-	for name, candidates := range map[string]func(t *testing.T) []*testutil.FakeSFU{
-		"coordinator without fast_join": nil,
-		"SFUs without FastJoin": func(t *testing.T) []*testutil.FakeSFU {
-			sfus := []*testutil.FakeSFU{testutil.NewFakeSFU(testutil.WithoutFastJoin()), testutil.NewFakeSFU(testutil.WithoutFastJoin())}
-			for _, sfu := range sfus {
-				t.Cleanup(sfu.Close)
-			}
-			return sfus
+	for name, tc := range map[string]struct {
+		candidates func(t *testing.T) []*testutil.FakeSFU
+		refusal    *httpAnswer
+		// peer is who the fallback span blames.
+		peer jointrace.Peer
+	}{
+		"coordinator without fast_join": {peer: jointrace.PeerCoordinator},
+		"edge without fast_join": {
+			refusal: coordinatorRefusal(http.StatusNotFound, 16, "", "Not Found"),
+			peer:    jointrace.PeerCoordinator,
 		},
-		"SFU that cannot create the call": func(t *testing.T) []*testutil.FakeSFU {
-			sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
-				FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_INTERNAL_SERVER_ERROR,
-					"this server cannot create the call; join through the coordinator"),
-			}))
-			t.Cleanup(sfu.Close)
-			return []*testutil.FakeSFU{sfu}
+		"fast_join switched off": {
+			refusal: coordinatorRefusal(http.StatusNotFound, 114, "FastJoinCall", "fast_join is turned off for this app; use join"),
+			peer:    jointrace.PeerCoordinator,
+		},
+		"SFUs without FastJoin": {
+			candidates: func(t *testing.T) []*testutil.FakeSFU {
+				sfus := []*testutil.FakeSFU{testutil.NewFakeSFU(testutil.WithoutFastJoin()), testutil.NewFakeSFU(testutil.WithoutFastJoin())}
+				for _, sfu := range sfus {
+					t.Cleanup(sfu.Close)
+				}
+				return sfus
+			},
+			peer: jointrace.PeerSFU,
+		},
+		"SFU that cannot create the call": {
+			candidates: func(t *testing.T) []*testutil.FakeSFU {
+				sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+					FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_INTERNAL_SERVER_ERROR,
+						"this server cannot create the call; join through the coordinator"),
+				}))
+				t.Cleanup(sfu.Close)
+				return []*testutil.FakeSFU{sfu}
+			},
+			peer: jointrace.PeerSFU,
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			f := newFakeCoordinator(t, 0, false)
-			if candidates != nil {
-				f.serveFastJoin(candidates(t)...)
+			if tc.candidates != nil {
+				f.serveFastJoin(tc.candidates(t)...)
+			}
+			if tc.refusal != nil {
+				f.fastJoinRefusal.Store(tc.refusal)
 			}
 			call := fastJoinCall(t, f, "fallback")
+			start := time.Now()
 			require.NoError(t, joinFast(t, call))
 			require.Equal(t, JoinFlowLegacy, call.JoinFlow())
 			require.Len(t, f.joins, 1)
+			if tc.refusal != nil {
+				require.EqualValues(t, 1, f.fastJoinRefused.Load(), "one fast_join, not retried")
+				require.Less(t, time.Since(start), time.Second, "no backoff before the legacy join")
+			}
 
 			join, err := testutil.NextRequestOf[*sfu_events.SfuRequest_JoinRequest](f.sfu, time.Second)
 			require.NoError(t, err)
@@ -669,6 +815,11 @@ func TestFastJoinFallsBackToTheLegacyJoin(t *testing.T) {
 			pcs, _ := trace.Span(jointrace.PCsCreate)
 			coord, _ := trace.Span(jointrace.CoordJoin)
 			require.False(t, pcs.Start.Before(coord.End), "the legacy join's pcs.create, not the abandoned fast one")
+			fallback, ok := trace.Span(jointrace.FastJoinFallback)
+			require.True(t, ok, "no %s span", jointrace.FastJoinFallback)
+			require.Contains(t, fallback.Note, "fast join unavailable")
+			require.Equal(t, tc.peer, fallback.Peer)
+			require.Equal(t, []string{jointrace.FastJoinFallback}, coord.After)
 		})
 	}
 }
@@ -723,4 +874,84 @@ func TestFastJoinUnknownUser(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(started), wsDelay)
 	require.Equal(t, JoinFlowFast, call.JoinFlow(), "an unknown user is not a coordinator without fast_join")
 	require.Len(t, f.fastJoins, 2, "refused, then joined once the websocket is up")
+}
+
+// TestPreferredSubscribeOptions: the options go with the FastJoin and its attach, and
+// with the legacy JoinRequest.
+func TestPreferredSubscribeOptions(t *testing.T) {
+	t.Parallel()
+
+	options := []*sfu_models.SubscribeOption{{
+		TrackType: sfu_models.TrackType_TRACK_TYPE_VIDEO,
+		Codecs:    []*sfu_models.Codec{{Name: "vp9"}, {Name: "vp8"}},
+	}}
+	want := func(t *testing.T, got []*sfu_models.SubscribeOption) {
+		t.Helper()
+		require.Len(t, got, 1)
+		require.Equal(t, sfu_models.TrackType_TRACK_TYPE_VIDEO, got[0].GetTrackType())
+		require.Equal(t, "vp9", got[0].GetCodecs()[0].GetName())
+	}
+
+	t.Run("fast", func(t *testing.T) {
+		t.Parallel()
+
+		sfu := testutil.NewFakeSFU()
+		t.Cleanup(sfu.Close)
+		f := newFakeCoordinator(t, 0, false)
+		f.serveFastJoin(sfu)
+		call := fastJoinCall(t, f, "subscribe-options")
+		require.NoError(t, joinFast(t, call, WithPreferredSubscribeOptions(options...)))
+		req, err := testutil.NextRPCRequest[*signal_rpc.FastJoinRequest](sfu, time.Second)
+		require.NoError(t, err)
+		want(t, req.GetPreferredSubscribeOptions())
+		attach, err := testutil.NextRequestOf[*sfu_events.SfuRequest_JoinRequest](sfu, 5*time.Second)
+		require.NoError(t, err)
+		want(t, attach.JoinRequest.GetPreferredSubscribeOptions())
+	})
+
+	t.Run("legacy", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeCoordinator(t, 0, false)
+		call := fastJoinCall(t, f, "subscribe-options-legacy")
+		require.NoError(t, joinFast(t, call, WithJoinFlow(JoinFlowLegacy), WithPreferredSubscribeOptions(options...)))
+		join, err := testutil.NextRequestOf[*sfu_events.SfuRequest_JoinRequest](f.sfu, time.Second)
+		require.NoError(t, err)
+		want(t, join.JoinRequest.GetPreferredSubscribeOptions())
+	})
+}
+
+// TestJoinICEServers: the coordinator's ICE servers go to every peer connection the
+// application gave none, on both flows, and never replace the application's own.
+func TestJoinICEServers(t *testing.T) {
+	t.Parallel()
+
+	coordinatorServers := []models.ICEServerResponse{{Urls: []string{"turn:127.0.0.1:3478"}, Username: "fake-user", Password: "fake-password"}}
+	own := loopbackPeerConfig()
+	own.Config.ICEServers = []webrtc.ICEServer{{URLs: []string{"stun:127.0.0.1:3479"}}}
+	urls := func(pc *webrtc.PeerConnection) []string {
+		var out []string
+		for _, s := range pc.GetConfiguration().ICEServers {
+			out = append(out, s.URLs...)
+		}
+		return out
+	}
+
+	for name, flow := range map[string]JoinFlow{"fast": JoinFlowFast, "legacy": JoinFlowLegacy} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sfu := testutil.NewFakeSFU()
+			t.Cleanup(sfu.Close)
+			f := newFakeCoordinator(t, 0, false)
+			f.serveFastJoin(sfu)
+			f.iceServers.Store(&coordinatorServers)
+			call := fastJoinCall(t, f, "ice-servers-"+name)
+			require.NoError(t, joinFast(t, call, WithJoinFlow(flow),
+				WithPublisherPeerConfiguration(own), WithSubscriberPeerConfiguration(loopbackPeerConfig())))
+			require.Equal(t, flow, call.JoinFlow())
+			require.Equal(t, []string{"stun:127.0.0.1:3479"}, urls(call.publisherPeer().PC), "the application's")
+			require.Equal(t, []string{"turn:127.0.0.1:3478"}, urls(call.subscriberPeer().PC), "the coordinator's")
+		})
+	}
 }

@@ -40,6 +40,8 @@ type runResult struct {
 	GapMs float64 `json:"gap_ms,omitempty"`
 	// AudioSlots is -audio-slots, for the fast flow.
 	AudioSlots *uint `json:"audio_slots,omitempty"`
+	// ICEPolicy is -ice-policy when it is not all.
+	ICEPolicy string `json:"ice_policy,omitempty"`
 
 	// RTTc and RTTs are the measured round trips to the coordinator and the SFU,
 	// averaged over the run's traces; RTTudp the media path's.

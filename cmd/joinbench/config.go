@@ -29,6 +29,9 @@ const (
 	flowLegacy = "legacy"
 	flowFast   = "fast"
 
+	icePolicyAll   = "all"
+	icePolicyRelay = "relay"
+
 	modeCold = "cold"
 	modeWarm = "warm"
 
@@ -57,9 +60,12 @@ type config struct {
 	// grant (-break-candidates, fastjoinfault builds only), so the join falls back.
 	BreakCandidates int
 	// BreakRounds is how many of each fast join's fast_join answers get a broken grant
-	// on every candidate (-break-rounds, fastjoinfault builds only), so the join asks
-	// fast_join again with the SFUs that failed.
+	// on every candidate (-break-rounds, fastjoinfault builds only): 1 makes the join ask
+	// fast_join again with the SFUs that failed, 2 makes it fall back to the legacy join.
 	BreakRounds int
+	// ICEPolicy is -ice-policy: all, or relay for a client that reaches the SFU only
+	// through TURN.
+	ICEPolicy string
 	// SecondJoinDelay is how long after alice's Join bob joins, at the earliest once
 	// she publishes; zero joins him as soon as she publishes.
 	SecondJoinDelay time.Duration
@@ -84,7 +90,8 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs := flag.NewFlagSet("joinbench", flag.ContinueOnError)
 	fs.SetOutput(output)
 	fs.StringVar(&c.Env, "env", envLocal, "local (the T03 stack) or staging (STREAM_* from the environment)")
-	fs.StringVar(&c.Flow, "flow", flowLegacy, "join path: legacy (coordinator join, SFU websocket join) or fast (fast_join, FastJoin); a fast join that falls back to legacy fails the run")
+	fs.StringVar(&c.Flow, "flow", flowFast, "join path: fast (fast_join, FastJoin) or legacy (coordinator join, SFU websocket join); a fast join that falls back to legacy fails the run")
+	fs.StringVar(&c.ICEPolicy, "ice-policy", icePolicyAll, "ICE transport policy of both peer connections: all, or relay (TURN only)")
 	fs.StringVar(&modes, "mode", "cold,warm", "comma-separated: cold (new Client per run), warm (one Client, one discarded join)")
 	fs.StringVar(&scenarios, "scenario", scenarioPubSub, "comma-separated: pubsub (alice publishes, bob subscribes), one-to-one (bob publishes and subscribes, timed)")
 	fs.DurationVar(&rtt, "rtt", rtt, "round trip injected with WithNetworkDelay (default 100ms for local, 0 for staging)")
@@ -142,8 +149,13 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	if c.BreakCandidates > 0 && c.Flow != flowFast {
 		return config{}, errors.New("-break-candidates needs -flow fast: only the fast join has candidates")
 	}
-	if c.BreakRounds != 0 && c.BreakRounds != 1 {
-		return config{}, fmt.Errorf("-break-rounds %d: want 0 or 1, the join asks fast_join twice", c.BreakRounds)
+	if c.BreakRounds < 0 || c.BreakRounds > 2 {
+		return config{}, fmt.Errorf("-break-rounds %d: want 0, 1 or 2, the join asks fast_join twice", c.BreakRounds)
+	}
+	switch c.ICEPolicy {
+	case icePolicyAll, icePolicyRelay:
+	default:
+		return config{}, fmt.Errorf("-ice-policy %q: want all or relay", c.ICEPolicy)
 	}
 	if c.BreakRounds > 0 && c.Flow != flowFast {
 		return config{}, errors.New("-break-rounds needs -flow fast: only the fast join has candidates")
