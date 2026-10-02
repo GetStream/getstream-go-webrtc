@@ -2,6 +2,7 @@ package netdelay
 
 import (
 	"errors"
+	"io"
 	"net"
 	"time"
 
@@ -172,6 +173,41 @@ func (n *Net) DialUDP(network string, laddr, raddr *net.UDPAddr) (transport.UDPC
 	}
 	return NewUDPConn(conn, n.rtt), nil
 }
+
+// DialTCP is how pion-ice reaches a TURN server over TCP; without it the relay leg of a
+// TURN/TCP candidate would cross no delay at all.
+func (n *Net) DialTCP(network string, laddr, raddr *net.TCPAddr) (transport.TCPConn, error) {
+	conn, err := n.Net.DialTCP(network, laddr, raddr)
+	if err != nil {
+		return nil, err
+	}
+	time.Sleep(n.rtt)
+	return &TCPConn{Conn: NewConn(conn, n.rtt), tcp: conn}, nil
+}
+
+// TCPConn is a Conn over a pion transport.TCPConn.
+type TCPConn struct {
+	*Conn
+	tcp transport.TCPConn
+}
+
+var _ transport.TCPConn = (*TCPConn)(nil)
+
+func (c *TCPConn) CloseRead() error                         { return c.tcp.CloseRead() }
+func (c *TCPConn) CloseWrite() error                        { return c.tcp.CloseWrite() }
+func (c *TCPConn) SetLinger(sec int) error                  { return c.tcp.SetLinger(sec) }
+func (c *TCPConn) SetKeepAlive(keepalive bool) error        { return c.tcp.SetKeepAlive(keepalive) }
+func (c *TCPConn) SetKeepAlivePeriod(d time.Duration) error { return c.tcp.SetKeepAlivePeriod(d) }
+func (c *TCPConn) SetNoDelay(noDelay bool) error            { return c.tcp.SetNoDelay(noDelay) }
+func (c *TCPConn) SetReadBuffer(bytes int) error            { return c.tcp.SetReadBuffer(bytes) }
+func (c *TCPConn) SetWriteBuffer(bytes int) error           { return c.tcp.SetWriteBuffer(bytes) }
+
+// ReadFrom writes what it reads from r through the delay.
+func (c *TCPConn) ReadFrom(r io.Reader) (int64, error) {
+	return io.Copy(writerOnly{c.Conn}, r)
+}
+
+type writerOnly struct{ io.Writer }
 
 func (n *Net) Dial(network, address string) (net.Conn, error) {
 	conn, err := n.Net.Dial(network, address)
