@@ -67,7 +67,17 @@ type fakeCoordinator struct {
 	// candidateLimit, when set, is how many candidates fast_join returns, as the
 	// coordinator returns at most 5.
 	candidateLimit atomic.Int32
-	token          string
+	// fastJoinRefusal, when set, is what fast_join answers from its from-th request on.
+	fastJoinRefusal atomic.Pointer[coordinatorRefusal]
+	fastJoinCount   atomic.Int32
+	token           string
+}
+
+// coordinatorRefusal is a coordinator error answer, from the from-th request on.
+type coordinatorRefusal struct {
+	from   int32
+	status int
+	body   string
 }
 
 // fastJoinCandidates is what fast_join returns for req: the candidates in order, those
@@ -239,6 +249,11 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Server-Timing", "fastjoin;dur=1.5")
+		if refusal := f.fastJoinRefusal.Load(); refusal != nil && f.fastJoinCount.Add(1) >= refusal.from {
+			w.WriteHeader(refusal.status)
+			_, _ = w.Write([]byte(refusal.body))
+			return
+		}
 		if unknownUser(w) {
 			return
 		}
