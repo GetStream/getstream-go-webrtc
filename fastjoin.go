@@ -246,7 +246,7 @@ func (c *Call) fastJoinSFU(
 		c.applyFastJoinCoordinator(options, coord)
 		var resp *sfu_events.JoinResponse
 		resp, err = c.joinCandidates(ctx, options, local, fastJoinRound{n: round, start: start}, coord.Candidates, rec)
-		if err == nil || errors.Is(err, errFastJoinUnavailable) || errors.Is(err, errFastJoinFatal) || ctx.Err() != nil {
+		if err == nil || errors.Is(err, errFastJoinUnavailable) || errors.Is(err, ErrJoinRefused) || ctx.Err() != nil {
 			return resp, err
 		}
 		for _, candidate := range coord.Candidates {
@@ -284,8 +284,13 @@ func (c *Call) applyFastJoinCoordinator(options joinOptions, resp *models.FastJo
 	c.coordinatorState.Store(state)
 }
 
-// errFastJoinFatal marks an SFU answer no other candidate would change.
-var errFastJoinFatal = errors.New("fast join refused")
+// ErrJoinRefused is what Join's error wraps when an SFU refused the client in a way no
+// other SFU would change, and Join stopped there: the coordinator revoked its credentials
+// because the user was kicked or blocked, it may not publish what it asked to, or the
+// call is full. Only a new Join, which asks the coordinator for new credentials, can get
+// the user in, if the coordinator lets it. A refusal by the coordinator itself is a
+// *coordinator.Error, as on the legacy join.
+var ErrJoinRefused = errors.New("join refused")
 
 // joinCandidates tries the candidates in order. What happens after a failed one
 // follows the SFU's error: see fastJoinOutcome.
@@ -346,7 +351,7 @@ func (c *Call) joinCandidates(
 		case fastJoinLegacy:
 			return nil, fmt.Errorf("%w: %w", errFastJoinUnavailable, err)
 		case fastJoinRefused:
-			return nil, fmt.Errorf("%w: %w", errFastJoinFatal, err)
+			return nil, fmt.Errorf("%w: %w", ErrJoinRefused, err)
 		case fastJoinUnavailable:
 			unavailable++
 		}
@@ -400,7 +405,7 @@ const (
 	fastJoinUnavailable
 	// fastJoinLegacy: the SFU cannot create the call itself; join the legacy way.
 	fastJoinLegacy
-	// fastJoinRefused: no SFU would take the client.
+	// fastJoinRefused: no SFU would take the client; Join fails with ErrJoinRefused.
 	fastJoinRefused
 )
 
@@ -427,14 +432,26 @@ func fastJoinOutcome(resp *signal_rpc.FastJoinResponse, err error) (fastJoinResu
 		return fastJoinLegacy, err
 	}
 	// SFU_FULL and SFU_SHUTTING_DOWN created nothing; UNAUTHENTICATED is about this
-	// candidate's token or grant, and the next has its own.
+	// candidate's token or grant, and the next has its own. A grant of a call session
+	// that has ended is refused by every candidate, and the next fast_join asks the
+	// coordinator, which decides whether the user may join the next session.
 	return fastJoinNext, err
 }
 
 // terminalRefusal reports whether an SFU refuses the client for a reason that holds on
 // every SFU and for the legacy join too, such as a full call: Join fails with it at once.
 func terminalRefusal(sfuErr *sfu_models.Error) bool {
-	return sfuErr.GetCode() == sfu_models.ErrorCode_ERROR_CODE_CALL_PARTICIPANT_LIMIT_REACHED
+	switch sfuErr.GetCode() {
+	case sfu_models.ErrorCode_ERROR_CODE_CALL_PARTICIPANT_LIMIT_REACHED:
+		return true
+	case sfu_models.ErrorCode_ERROR_CODE_PERMISSION_DENIED:
+		// The coordinator kicked or blocked the user and revoked the token on every
+		// candidate, or the call's other SFUs do not grant the permission either: the
+		// other candidates refuse the same way, and a second fast_join would take a
+		// kicked user back in without the app asking.
+		return true
+	}
+	return false
 }
 
 // serverTimings records the SFU's own account of the FastJoin, as a Server-Timing header

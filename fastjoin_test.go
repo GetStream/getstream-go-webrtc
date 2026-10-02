@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/twitchtv/twirp"
 
+	"github.com/GetStream/getstream-go-webrtc/coordinator"
 	"github.com/GetStream/getstream-go-webrtc/coordinator/models"
 	"github.com/GetStream/getstream-go-webrtc/internal/testutil"
 	"github.com/GetStream/getstream-go-webrtc/jointrace"
@@ -78,6 +79,10 @@ func TestFastJoinOutcome(t *testing.T) {
 		"shutting down":   {resp: answer(sfu_models.ErrorCode_ERROR_CODE_SFU_SHUTTING_DOWN, "bye"), want: fastJoinNext},
 		"unauthenticated": {resp: answer(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "grant"), want: fastJoinNext},
 		"call is full":    {resp: answer(sfu_models.ErrorCode_ERROR_CODE_CALL_PARTICIPANT_LIMIT_REACHED, "limit"), want: fastJoinRefused},
+		"credential revoked": {
+			resp: answer(sfu_models.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "credential revoked: request a new one from the coordinator"),
+			want: fastJoinRefused,
+		},
 		"no bus credential": {
 			resp: answer(sfu_models.ErrorCode_ERROR_CODE_INTERNAL_SERVER_ERROR, "this server cannot create the call; join through the coordinator"),
 			want: fastJoinLegacy,
@@ -732,10 +737,93 @@ func TestFastJoinRefusedByTheCall(t *testing.T) {
 	f := newFakeCoordinator(t, 0, false)
 	f.serveFastJoin(sfu1, sfu2)
 	call := fastJoinCall(t, f, "call-full")
-	require.ErrorContains(t, joinFast(t, call), "call is full")
+	err := joinFast(t, call)
+	require.ErrorContains(t, err, "call is full")
+	require.ErrorIs(t, err, ErrJoinRefused)
 	require.Empty(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu2))
 	require.Empty(t, f.joins)
 	require.Len(t, f.fastJoins, 1)
+}
+
+// TestFastJoinStopsAtARevokedCredential: a user the coordinator kicked or blocked has
+// their token revoked on every candidate. The first refusal ends the join: the other
+// candidates and a second fast_join would only replay the revoked credentials.
+func TestFastJoinStopsAtARevokedCredential(t *testing.T) {
+	t.Parallel()
+
+	revoked := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+		FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_PERMISSION_DENIED, "credential revoked: request a new one from the coordinator"),
+	}))
+	other := testutil.NewFakeSFU()
+	t.Cleanup(revoked.Close)
+	t.Cleanup(other.Close)
+	f := newFakeCoordinator(t, 0, false)
+	f.serveFastJoin(revoked, other)
+	call := fastJoinCall(t, f, "revoked")
+
+	err := joinFast(t, call)
+	require.ErrorIs(t, err, ErrJoinRefused)
+	require.ErrorContains(t, err, "credential revoked")
+	require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](revoked), 1)
+	require.Empty(t, rpcsOf[*signal_rpc.FastJoinRequest](other), "no other candidate")
+	require.Len(t, f.fastJoins, 1, "no second fast_join")
+	require.Empty(t, f.joins, "no legacy join")
+	_, err = testutil.NextRequestOf[*sfu_events.SfuRequest_JoinRequest](revoked, 200*time.Millisecond)
+	require.Error(t, err, "no websocket attach")
+}
+
+// TestFastJoinCoordinatorRefusalIsFinal: what the coordinator refuses on fast_join, it
+// would refuse on join: Join reports it, without the legacy join or another fast_join,
+// on the first fast_join or on the second, after a session ended and every candidate
+// refused its grant.
+func TestFastJoinCoordinatorRefusalIsFinal(t *testing.T) {
+	t.Parallel()
+
+	for name, tc := range map[string]struct {
+		from   int32
+		status int
+		body   string
+	}{
+		"blocked in the call": {
+			from: 1, status: http.StatusForbidden,
+			body: `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+		},
+		"banned": {
+			from: 1, status: http.StatusForbidden,
+			body: `{"code":17,"message":"Sorry, you do not have access to this feature. Your account is currently banned.","StatusCode":403}`,
+		},
+		"token revoked": {
+			from: 1, status: http.StatusUnauthorized,
+			body: `{"code":40,"message":"token has been revoked","StatusCode":401}`,
+		},
+		"blocked after the session ended": {
+			from: 2, status: http.StatusForbidden,
+			body: `{"code":17,"message":"FastJoinCall failed with error: \"You cannot access call default:refused, your user was blocked.\"","StatusCode":403}`,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			sfu := testutil.NewFakeSFU(testutil.WithSignalRPC(testutil.SignalRPC{
+				FastJoin: sfuError(sfu_models.ErrorCode_ERROR_CODE_UNAUTHENTICATED, "setup grant revoked: the call session it was issued for has ended"),
+			}))
+			t.Cleanup(sfu.Close)
+			f := newFakeCoordinator(t, 0, false)
+			f.serveFastJoin(sfu)
+			f.fastJoinRefusal.Store(&httpAnswer{from: tc.from, status: tc.status, body: tc.body})
+			call := fastJoinCall(t, f, "refused")
+
+			err := joinFast(t, call)
+			var coordErr *coordinator.Error
+			require.ErrorAs(t, err, &coordErr)
+			require.Equal(t, tc.status, coordErr.Status)
+			require.False(t, coordinator.IsRetryableError(err))
+			require.EqualValues(t, 1, f.fastJoinRefused.Load(), "no fast_join after the refusal")
+			require.Len(t, f.fastJoins, int(tc.from)-1)
+			require.Len(t, rpcsOf[*signal_rpc.FastJoinRequest](sfu), int(tc.from)-1)
+			require.Empty(t, f.joins, "no legacy join")
+		})
+	}
 }
 
 // TestFastJoinFallsBackToTheLegacyJoin: where the deployment cannot fast join, Join

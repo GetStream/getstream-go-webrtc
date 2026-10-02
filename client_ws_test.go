@@ -68,16 +68,20 @@ type fakeCoordinator struct {
 	// coordinator returns at most 5.
 	candidateLimit atomic.Int32
 	// fastJoinRefusal and joinRefusal, when set, are what fast_join and join answer
-	// instead; fastJoinRefused and joinRefused count those answers.
+	// instead; fastJoinRefused and joinRefused count those answers. fastJoinCount
+	// counts every fast_join request.
 	fastJoinRefusal, joinRefusal atomic.Pointer[httpAnswer]
 	fastJoinRefused, joinRefused atomic.Int32
+	fastJoinCount                atomic.Int32
 	// iceServers, when set, go with every candidate and join credential.
 	iceServers atomic.Pointer[[]models.ICEServerResponse]
 	token      string
 }
 
-// httpAnswer is a canned HTTP response.
+// httpAnswer is a canned HTTP response. As fastJoinRefusal, it answers from the
+// from-th fast_join on; zero means the first.
 type httpAnswer struct {
+	from   int32
 	status int
 	body   string
 }
@@ -267,7 +271,8 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		_ = json.NewEncoder(w).Encode(models.JoinCallResponse{Credentials: cred})
 	})
 	mux.HandleFunc("POST /api/v2/video/call/{type}/{id}/fast_join", func(w http.ResponseWriter, r *http.Request) {
-		if refusal := f.fastJoinRefusal.Load(); refusal != nil {
+		n := f.fastJoinCount.Add(1)
+		if refusal := f.fastJoinRefusal.Load(); refusal != nil && n >= refusal.from {
 			f.fastJoinRefused.Add(1)
 			refusal.write(w)
 			return
