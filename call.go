@@ -53,6 +53,9 @@ type joinOptions struct {
 	// preferredPublishOptions tells the SFU what this client would rather
 	// publish; the SFU answers with the options it actually wants.
 	preferredPublishOptions []*sfu_models.PublishOption
+	// preferredSubscribeOptions tells the SFU which codecs this client would rather
+	// receive.
+	preferredSubscribeOptions []*sfu_models.SubscribeOption
 	// capabilities are the optional SFU behaviours this client opts into.
 	capabilities []sfu_models.ClientCapability
 
@@ -194,6 +197,16 @@ func WithMigratingFrom(sfuID string) JoinOption {
 func WithPreferredPublishOptions(opts ...*sfu_models.PublishOption) JoinOption {
 	return func(o *joinOptions) {
 		o.preferredPublishOptions = clonePublishOptions(opts)
+	}
+}
+
+// WithPreferredSubscribeOptions tells the SFU which codec this client would rather
+// receive for a track type: the first of each option's codecs. Like
+// WithPreferredPublishOptions, it is a request the SFU weighs against the call. It goes
+// with the FastJoin or the JoinRequest, and with the JoinRequest of every reconnect.
+func WithPreferredSubscribeOptions(opts ...*sfu_models.SubscribeOption) JoinOption {
+	return func(o *joinOptions) {
+		o.preferredSubscribeOptions = cloneSubscribeOptions(opts)
 	}
 }
 
@@ -507,7 +520,8 @@ func (c *Call) isJoinErrorRetryable(err error) bool {
 
 	coordErr := &coordinator.Error{}
 	if ok := errors.As(err, &coordErr); ok {
-		return coordErr.ShouldRetry
+		// retryJoin has already retried a join the coordinator could not complete.
+		return coordErr.ShouldRetry && !coordinator.IsJoinFlowFailure(err)
 	}
 
 	signalErr := &signal.Error{}
@@ -896,11 +910,13 @@ func (c *Call) Join(ctx context.Context, opts ...JoinOption) (*sfu_events.JoinRe
 	}
 
 	if !reconnecting && c.GetCred == nil && options.flow == JoinFlowFast {
+		start := time.Now()
 		resp, err := c.fastJoin(ctx, opts, options, rec)
-		if !errors.Is(err, errFastJoinUnavailable) {
+		if err == nil || !fallsBackToLegacy(ctx, err) {
 			return resp, err
 		}
-		c.logger.WithField("err", err).Warn("fast join unavailable, joining the legacy way")
+		c.logger.WithField("err", err).Warn("fast join did not work out, joining the legacy way")
+		fastJoinFallback(rec, start, err)
 	}
 
 	resp, err := c.legacyJoin(ctx, opts, options, rec, reconnecting)
@@ -952,9 +968,10 @@ func (c *Call) joinRequest(options joinOptions, publisherSDP, subscriberSDP stri
 		// SessionId rotates on every rejoin, so without this the server cannot
 		// tell that the sessions before and after an outage were the same call
 		// from the same client, and its stats are split across them.
-		UnifiedSessionId:        c.unifiedSessionID(),
-		Capabilities:            options.clientCapabilities(),
-		PreferredPublishOptions: options.preferredPublishOptions,
+		UnifiedSessionId:          c.unifiedSessionID(),
+		Capabilities:              options.clientCapabilities(),
+		PreferredPublishOptions:   options.preferredPublishOptions,
+		PreferredSubscribeOptions: options.preferredSubscribeOptions,
 	}
 }
 

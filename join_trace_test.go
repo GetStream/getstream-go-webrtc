@@ -33,6 +33,9 @@ type mediaSFU struct {
 	aliceAudio *webrtc.TrackLocalStaticSample
 	// holdAnswers, when set, holds every SendAnswer until it is closed.
 	holdAnswers atomic.Pointer[chan struct{}]
+	// fastJoined is set once a FastJoin has reached the SFU, which has then
+	// authenticated its token.
+	fastJoined atomic.Bool
 }
 
 func newMediaSFU(t *testing.T, opts ...testutil.FakeSFUOption) *mediaSFU {
@@ -52,6 +55,7 @@ func newMediaSFU(t *testing.T, opts ...testutil.FakeSFUOption) *mediaSFU {
 			// As the SFU's: the publisher answered, and the subscriber offered alice's
 			// audio, which a fast-joined participant is subscribed to.
 			FastJoin: func(_ context.Context, req *signal_rpc.FastJoinRequest) (*signal_rpc.FastJoinResponse, error) {
+				m.fastJoined.Store(true)
 				resp := &signal_rpc.FastJoinResponse{
 					CallState:               callState,
 					SubscriberNegotiationId: 1,

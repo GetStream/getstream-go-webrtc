@@ -34,8 +34,11 @@ const (
 	// attaches alongside and carries only events.
 	//
 	// A deployment without fast join -- a coordinator or edge that does not know
-	// fast_join, SFUs without FastJoin, or an SFU that cannot create the call itself --
-	// is joined with JoinFlowLegacy instead; Call.JoinFlow tells which ran.
+	// fast_join or has it turned off, SFUs without FastJoin, or an SFU that cannot
+	// create the call itself -- is joined with JoinFlowLegacy instead. So is a join that
+	// no candidate took in either round of fast_join, unless the refusal holds for the
+	// legacy join too, such as a full call. Call.JoinFlow tells which ran, and the join
+	// trace's jointrace.FastJoinFallback span why.
 	JoinFlowFast JoinFlow = "fast"
 	// JoinFlowLegacy is the coordinator's join, which sets the call up on one SFU, then
 	// the SFU websocket's JoinRequest, SetPublisher and SendAnswer, each waited for. It
@@ -66,9 +69,36 @@ func (c *Call) JoinFlow() JoinFlow {
 	return flow
 }
 
-// errFastJoinUnavailable means the deployment cannot be fast joined, and the join
-// goes the legacy way.
-var errFastJoinUnavailable = errors.New("fast join unavailable")
+var (
+	// errFastJoinUnavailable means the deployment cannot be fast joined, and the join
+	// goes the legacy way.
+	errFastJoinUnavailable = errors.New("fast join unavailable")
+	// errFastJoinFailed means no candidate of either round took the client, for reasons
+	// that may not hold for the legacy join: the join tries it once.
+	errFastJoinFailed = errors.New("fast join failed")
+)
+
+// fallsBackToLegacy reports whether a failed fast join is followed by a legacy join.
+func fallsBackToLegacy(ctx context.Context, err error) bool {
+	return ctx.Err() == nil && (errors.Is(err, errFastJoinUnavailable) || errors.Is(err, errFastJoinFailed))
+}
+
+// fastJoinFallback records why the join left the fast join for the legacy one, from the
+// start of the fast join to that moment.
+func fastJoinFallback(rec *jointrace.Recorder, start time.Time, err error) {
+	peer := jointrace.PeerSFU
+	if coordinator.IsFastJoinUnavailable(err) {
+		peer = jointrace.PeerCoordinator
+	}
+	note := err.Error()
+	if len(note) > 200 {
+		note = note[:200] + "…"
+	}
+	rec.Add(jointrace.Span{
+		Name: jointrace.FastJoinFallback, Start: start, End: time.Now(),
+		Kind: jointrace.KindNet, Peer: peer, Note: note,
+	})
+}
 
 const (
 	// fastJoinRounds is how many times fast_join is asked for candidates when none of
@@ -92,13 +122,13 @@ type fastJoinLocal struct {
 	subscriberSDP string
 }
 
-// fastJoin runs the fast join, returning errFastJoinUnavailable, with nothing left
-// behind, when the deployment does not support it.
+// fastJoin runs the fast join. When the deployment does not support it, or no candidate
+// took the client, it returns an error fallsBackToLegacy accepts, with nothing left behind.
 func (c *Call) fastJoin(ctx context.Context, opts []JoinOption, options joinOptions, rec *jointrace.Recorder) (*sfu_events.JoinResponse, error) {
 	c.setSessionID(options)
 	c.rememberJoinOptions(opts)
 	c.externalRTCP = options.externalRTCP
-	c.trace.setFast(true)
+	c.trace.setFast(true, options.publishAfterFastJoin())
 
 	type coordResult struct {
 		resp *models.FastJoinCallResponse
@@ -118,13 +148,20 @@ func (c *Call) fastJoin(ctx context.Context, opts []JoinOption, options joinOpti
 	if err == nil {
 		var resp *sfu_events.JoinResponse
 		if resp, err = c.fastJoinSFU(ctx, options, local, coord.resp, rec); err == nil {
+			if options.publishAfterFastJoin() {
+				for _, t := range options.tracks {
+					if _, err := c.AddTrack(t.info, t.tracks[0]); err != nil {
+						return nil, xerr.Wrap(err)
+					}
+				}
+			}
 			return resp, nil
 		}
 	}
 
 	c.abandonFastJoin(rec)
-	if coordinator.IsNotFound(err) && !coordinator.IsUnknownUser(err) {
-		return nil, fmt.Errorf("%w: the coordinator has no fast_join: %w", errFastJoinUnavailable, err)
+	if coordinator.IsFastJoinUnavailable(err) {
+		return nil, fmt.Errorf("%w: the coordinator does not serve fast_join: %w", errFastJoinUnavailable, err)
 	}
 	return nil, err
 }
@@ -147,7 +184,7 @@ func (c *Call) prepareFastJoin(ctx context.Context, options joinOptions, rec *jo
 	}
 	local.subscriberSDP = sdp
 
-	if len(options.tracks) > 0 {
+	if len(options.tracks) > 0 && !options.publishAfterFastJoin() {
 		for _, t := range options.tracks {
 			if _, err := pub.AddTrack(c.recordPublishedTrack(t.info, t.tracks...), t.tracks[0]); err != nil {
 				return local, xerr.Wrap(err)
@@ -168,6 +205,15 @@ func (c *Call) prepareFastJoin(ctx context.Context, options joinOptions, rec *jo
 	return local, nil
 }
 
+// publishAfterFastJoin reports whether the join's tracks are published after the FastJoin
+// instead of in it. A relay-only publisher with no ICE servers of its own would gather
+// its offer before it has the SFU's TURN servers, and so with no candidate at all. The
+// SFU's TURN accepts its credentials only once the FastJoin has authenticated the token.
+func (o joinOptions) publishAfterFastJoin() bool {
+	cfg := o.publisherPeerConfig.Config
+	return len(o.tracks) > 0 && cfg.ICETransportPolicy == webrtc.ICETransportPolicyRelay && len(cfg.ICEServers) == 0
+}
+
 // abandonFastJoin undoes a fast join that did not work out, so a legacy join starts
 // from a call that was never joined.
 func (c *Call) abandonFastJoin(rec *jointrace.Recorder) {
@@ -175,7 +221,7 @@ func (c *Call) abandonFastJoin(rec *jointrace.Recorder) {
 	c.publishedTracksMu.Lock()
 	c.publishedTracks = nil
 	c.publishedTracksMu.Unlock()
-	c.trace.setFast(false)
+	c.trace.setFast(false, false)
 	rec.Remove(jointrace.PCsCreate)
 }
 
@@ -210,7 +256,7 @@ func (c *Call) fastJoinSFU(
 		}
 		c.logger.WithField("err", err).WithField("failed_sfus", failed).Warn("no fast join candidate took the client")
 	}
-	return nil, err
+	return nil, fmt.Errorf("%w: no candidate took the client in %d rounds: %w", errFastJoinFailed, fastJoinRounds, err)
 }
 
 // fastJoinRound is which fast_join answer joinCandidates is trying, and when the
@@ -327,18 +373,19 @@ func (c *Call) fastJoinCandidate(
 
 func (c *Call) fastJoinRequest(options joinOptions, local fastJoinLocal, candidate models.SFUCandidate) *signal_rpc.FastJoinRequest {
 	return &signal_rpc.FastJoinRequest{
-		Token:                   candidate.Token,
-		SetupGrant:              candidate.SetupGrant,
-		SessionId:               c.SessionID.Load(),
-		UnifiedSessionId:        c.unifiedSessionID(),
-		PublisherSdp:            local.offer.sdp.SDP,
-		Tracks:                  local.tracks,
-		SubscriberSdp:           local.subscriberSDP,
-		ClientDetails:           c.sfuClientDetails(),
-		Capabilities:            options.clientCapabilities(),
-		Source:                  c.cc.source.toSfuParticipantSource(),
-		PreferredPublishOptions: options.preferredPublishOptions,
-		AudioReceiveSlots:       options.audioReceiveSlots,
+		Token:                     candidate.Token,
+		SetupGrant:                candidate.SetupGrant,
+		SessionId:                 c.SessionID.Load(),
+		UnifiedSessionId:          c.unifiedSessionID(),
+		PublisherSdp:              local.offer.sdp.SDP,
+		Tracks:                    local.tracks,
+		SubscriberSdp:             local.subscriberSDP,
+		ClientDetails:             c.sfuClientDetails(),
+		Capabilities:              options.clientCapabilities(),
+		Source:                    c.cc.source.toSfuParticipantSource(),
+		PreferredPublishOptions:   options.preferredPublishOptions,
+		PreferredSubscribeOptions: options.preferredSubscribeOptions,
+		AudioReceiveSlots:         options.audioReceiveSlots,
 	}
 }
 
@@ -372,17 +419,22 @@ func fastJoinOutcome(resp *signal_rpc.FastJoinResponse, err error) (fastJoinResu
 		return fastJoinJoined, nil
 	}
 	err = signal.NewError(sfuErr.GetCode(), sfuErr.GetMessage(), sfuErr.GetShouldRetry())
-	switch sfuErr.GetCode() {
-	case sfu_models.ErrorCode_ERROR_CODE_CALL_PARTICIPANT_LIMIT_REACHED:
+	if terminalRefusal(sfuErr) {
 		return fastJoinRefused, err
-	case sfu_models.ErrorCode_ERROR_CODE_INTERNAL_SERVER_ERROR:
-		if strings.Contains(sfuErr.GetMessage(), "join through the coordinator") {
-			return fastJoinLegacy, err
-		}
+	}
+	if sfuErr.GetCode() == sfu_models.ErrorCode_ERROR_CODE_INTERNAL_SERVER_ERROR &&
+		strings.Contains(sfuErr.GetMessage(), "join through the coordinator") {
+		return fastJoinLegacy, err
 	}
 	// SFU_FULL and SFU_SHUTTING_DOWN created nothing; UNAUTHENTICATED is about this
 	// candidate's token or grant, and the next has its own.
 	return fastJoinNext, err
+}
+
+// terminalRefusal reports whether an SFU refuses the client for a reason that holds on
+// every SFU and for the legacy join too, such as a full call: Join fails with it at once.
+func terminalRefusal(sfuErr *sfu_models.Error) bool {
+	return sfuErr.GetCode() == sfu_models.ErrorCode_ERROR_CODE_CALL_PARTICIPANT_LIMIT_REACHED
 }
 
 // serverTimings records the SFU's own account of the FastJoin, as a Server-Timing header
@@ -428,10 +480,15 @@ func (c *Call) fastJoined(
 	c.applyJoinResponse(joinResp)
 
 	pub, sub := c.publisherPeer(), c.subscriberPeer()
-	// The peer connections were built before the SFU was chosen: they only use its
-	// TURN servers for gathering after an ICE restart.
-	for _, t := range []*webrtc.PeerConnection{pub.PC, sub.PC} {
-		setICEServers(t, cred.IceServers, c)
+	// The peer connections were built before the SFU was chosen. The subscriber gathers
+	// when it answers below, so with these servers; an offer in the FastJoin has gathered
+	// without them, and the publisher uses them after an ICE restart (but see
+	// publishAfterFastJoin). ICE servers the application set stay.
+	if len(options.publisherPeerConfig.Config.ICEServers) == 0 {
+		setICEServers(pub.PC, cred.IceServers, c)
+	}
+	if len(options.subscriberPeerConfig.Config.ICEServers) == 0 {
+		setICEServers(sub.PC, cred.IceServers, c)
 	}
 	pub.startTracing()
 	sub.startTracing()

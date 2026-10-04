@@ -3,6 +3,7 @@ package coordinator_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -195,6 +196,53 @@ func TestFastJoinCallNotFound(t *testing.T) {
 	require.Error(t, err)
 	require.True(t, coordinator.IsNotFound(err))
 	require.False(t, coordinator.IsUnknownUser(err))
+	require.True(t, coordinator.IsFastJoinUnavailable(err))
+}
+
+// IsFastJoinUnavailable tells a fast_join the deployment does not serve from the
+// handler's own refusals, which the legacy join would get too.
+func TestIsFastJoinUnavailable(t *testing.T) {
+	t.Parallel()
+
+	refusal := func(status, code int, handler, message string) error {
+		e := coordinator.NewError(code, fmt.Sprintf("%s failed with error: \"%s\"", handler, message), status/100 == 5)
+		e.Status = status
+		return e
+	}
+	for name, tc := range map[string]struct {
+		err  error
+		want bool
+	}{
+		"switched off":            {refusal(404, 114, "FastJoinCall", "fast_join is turned off for this app; use join"), true},
+		"edge without route":      {refusal(404, 16, "", "Not Found"), true},
+		"router without route":    {&coordinator.Error{Message: "unexpected status code 404: 404 page not found", Status: 404}, true},
+		"call not found":          {refusal(404, 16, "FastJoinCall", "Can't find call with id default:x"), false},
+		"unknown user":            {refusal(404, 16, "FastJoinCall", "the user thierry does not exist"), false},
+		"deactivated user":        {refusal(404, 16, "FastJoinCall", "the user thierry was deactivated"), false},
+		"deleted user":            {refusal(404, 16, "FastJoinCall", "the user thierry was deleted"), false},
+		"blocked":                 {refusal(403, 17, "FastJoinCall", "User 'thierry' is blocked from the call"), false},
+		"no SFU":                  {refusal(500, 101, "FastJoinCall", "could not find any available server for this call, try again"), false},
+		"not a coordinator error": {io.EOF, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			require.Equal(t, tc.want, coordinator.IsFastJoinUnavailable(tc.err))
+		})
+	}
+}
+
+// The coordinator's codes are its own: printing them under the SFU's names made code 101
+// read ERROR_CODE_PUBLISH_TRACKS_MISMATCH.
+func TestErrorPrintsTheCoordinatorCode(t *testing.T) {
+	t.Parallel()
+
+	e := coordinator.NewError(101, "could not find any available server for this call, try again", true)
+	require.Equal(t, "code: 101, message: could not find any available server for this call, try again", e.Error())
+	e.Status = 500
+	require.Equal(t, "code: 101, status: 500, message: could not find any available server for this call, try again", e.Error())
+	require.True(t, coordinator.IsJoinFlowFailure(e))
+	e.Status = 400
+	require.False(t, coordinator.IsJoinFlowFailure(e), "a join the request itself made impossible")
 }
 
 func TestJoinCallCarriesTheJoinQuery(t *testing.T) {

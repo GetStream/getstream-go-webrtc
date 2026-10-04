@@ -77,3 +77,15 @@ func clonePublishOptions(opts []*sfu_models.PublishOption) []*sfu_models.Publish
 	}
 	return out
 }
+
+// cloneSubscribeOptions is clonePublishOptions for subscribe options.
+func cloneSubscribeOptions(opts []*sfu_models.SubscribeOption) []*sfu_models.SubscribeOption {
+	if opts == nil {
+		return nil
+	}
+	out := make([]*sfu_models.SubscribeOption, 0, len(opts))
+	for _, o := range opts {
+		out = append(out, proto.Clone(o).(*sfu_models.SubscribeOption))
+	}
+	return out
+}

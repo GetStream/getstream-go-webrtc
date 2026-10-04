@@ -60,8 +60,8 @@ func run(cfg config, stdout io.Writer) error {
 
 	applyFaults(cfg)
 	b := newBench(cfg)
-	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q, broken candidates %d, broken rounds %d, second join delay %s, audio slots %d, gap %s\n",
-		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location, cfg.BreakCandidates, cfg.BreakRounds, cfg.SecondJoinDelay, cfg.AudioSlots, cfg.Gap)
+	fmt.Fprintf(stdout, "joinbench: env %s (%s), flow %s, modes %v, scenarios %v, runs %d, injected RTT %s, sfu %q, pin tag %q, location %q, broken candidates %d, broken rounds %d, second join delay %s, audio slots %d, gap %s, ice policy %s\n",
+		cfg.Env, cfg.BaseURL, cfg.Flow, cfg.Modes, cfg.Scenarios, cfg.Runs, cfg.RTT, cfg.SFU, cfg.PinTag, cfg.Location, cfg.BreakCandidates, cfg.BreakRounds, cfg.SecondJoinDelay, cfg.AudioSlots, cfg.Gap, cfg.ICEPolicy)
 	var results []runResult
 	var writeErr error
 	emit := func(r runResult) {
