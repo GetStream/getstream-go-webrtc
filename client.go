@@ -715,11 +715,8 @@ func newClient(apiKey string, user User, token TokenProvider, o options) (*Clien
 	c.wsReady = make(chan struct{})
 	if o.withCoordinatorWS {
 		auth := models.WSAuthMessage{
-			UserDetails: models.ConnectUserDetailsRequest{
-				ID:   userID,
-				Name: nonEmpty(user.Name),
-			},
-			Token: tok,
+			UserDetails: *c.connectUserDetails(),
+			Token:       tok,
 		}
 		c.wsCtx, c.wsCancel = context.WithCancel(context.Background())
 		c.wsDone = make(chan struct{})
@@ -920,6 +917,15 @@ func extractUserID(token string) string {
 	return ""
 }
 
+// connectUserDetails are the user details of the websocket connect, which creates the user
+// if the coordinator has never seen it. fast_join sends them too, since it can get there first.
+func (c *Client) connectUserDetails() *models.ConnectUserDetailsRequest {
+	return &models.ConnectUserDetailsRequest{
+		ID:   c.UserID,
+		Name: nonEmpty(c.User.Name),
+	}
+}
+
 func nonEmpty(s string) *string {
 	if s == "" {
 		return nil
@@ -977,7 +983,8 @@ const joinFlowAttempts = 5
 
 // retryJoin runs a coordinator join until it succeeds, retrying what IsRetryableError
 // allows with a backoff. A first-ever join of a user the coordinator does not know yet
-// waits once for the websocket, which is what creates the user.
+// waits once for the websocket, which is what creates the user for join, and for
+// fast_join on a coordinator that does not create it from the user details.
 func retryJoin[T any](
 	ctx context.Context,
 	c *Client,
@@ -1155,8 +1162,9 @@ func (c *Client) fastJoinCoordinator(
 	c.Tracing.Load().Emit(rtcstats.CoordinatorConnectEvent, joinCallRequest)
 	start := time.Now()
 	joinCtx := jointrace.WithStep(ctx, rec, jointrace.CoordFastJoin, jointrace.PeerCoordinator)
+	req := models.FastJoinCallRequest{JoinCallRequest: joinCallRequest, UserDetails: c.connectUserDetails()}
 	result, err := retryJoin(joinCtx, c, joinCallRequest, func(ctx context.Context) (models.FastJoinCallResponse, error) {
-		return c.CoordinatorClientInterface.FastJoinCall(ctx, callType, id, joinCallRequest)
+		return c.CoordinatorClientInterface.FastJoinCall(ctx, callType, id, req)
 	})
 	if err != nil {
 		return nil, err

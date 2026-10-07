@@ -30,7 +30,7 @@ var _ coordinator.CoordinatorClientInterface = &CoordinatorClientInterfaceMock{}
 //			DisconnectedFunc: func() <-chan struct{} {
 //				panic("mock out the Disconnected method")
 //			},
-//			FastJoinCallFunc: func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error) {
+//			FastJoinCallFunc: func(ctx context.Context, _type string, id string, fastJoinCallRequest models.FastJoinCallRequest) (models.FastJoinCallResponse, error) {
 //				panic("mock out the FastJoinCall method")
 //			},
 //			GetInterceptorFunc: func() *event.Store[models.WebsocketEvent] {
@@ -59,7 +59,7 @@ type CoordinatorClientInterfaceMock struct {
 	DisconnectedFunc func() <-chan struct{}
 
 	// FastJoinCallFunc mocks the FastJoinCall method.
-	FastJoinCallFunc func(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error)
+	FastJoinCallFunc func(ctx context.Context, _type string, id string, fastJoinCallRequest models.FastJoinCallRequest) (models.FastJoinCallResponse, error)
 
 	// GetInterceptorFunc mocks the GetInterceptor method.
 	GetInterceptorFunc func() *event.Store[models.WebsocketEvent]
@@ -90,8 +90,8 @@ type CoordinatorClientInterfaceMock struct {
 			_type string
 			// ID is the id argument value.
 			ID string
-			// JoinCallRequest is the joinCallRequest argument value.
-			JoinCallRequest models.JoinCallRequest
+			// FastJoinCallRequest is the fastJoinCallRequest argument value.
+			FastJoinCallRequest models.FastJoinCallRequest
 		}
 		// Disconnected holds details about calls to the Disconnected method.
 		Disconnected []struct {
@@ -195,25 +195,25 @@ func (mock *CoordinatorClientInterfaceMock) ConnectCalls() []struct {
 }
 
 // FastJoinCall calls FastJoinCallFunc.
-func (mock *CoordinatorClientInterfaceMock) FastJoinCall(ctx context.Context, _type string, id string, joinCallRequest models.JoinCallRequest) (models.FastJoinCallResponse, error) {
+func (mock *CoordinatorClientInterfaceMock) FastJoinCall(ctx context.Context, _type string, id string, fastJoinCallRequest models.FastJoinCallRequest) (models.FastJoinCallResponse, error) {
 	if mock.FastJoinCallFunc == nil {
 		panic("CoordinatorClientInterfaceMock.FastJoinCallFunc: method is nil but CoordinatorClientInterface.FastJoinCall was just called")
 	}
 	callInfo := struct {
-		Ctx             context.Context
-		_type           string
-		ID              string
-		JoinCallRequest models.JoinCallRequest
+		Ctx                 context.Context
+		_type               string
+		ID                  string
+		FastJoinCallRequest models.FastJoinCallRequest
 	}{
-		Ctx:             ctx,
-		_type:           _type,
-		ID:              id,
-		JoinCallRequest: joinCallRequest,
+		Ctx:                 ctx,
+		_type:               _type,
+		ID:                  id,
+		FastJoinCallRequest: fastJoinCallRequest,
 	}
 	mock.lockFastJoinCall.Lock()
 	mock.calls.FastJoinCall = append(mock.calls.FastJoinCall, callInfo)
 	mock.lockFastJoinCall.Unlock()
-	return mock.FastJoinCallFunc(ctx, _type, id, joinCallRequest)
+	return mock.FastJoinCallFunc(ctx, _type, id, fastJoinCallRequest)
 }
 
 // FastJoinCallCalls gets all the calls that were made to FastJoinCall.
@@ -221,16 +221,16 @@ func (mock *CoordinatorClientInterfaceMock) FastJoinCall(ctx context.Context, _t
 //
 //	len(mockedCoordinatorClientInterface.FastJoinCallCalls())
 func (mock *CoordinatorClientInterfaceMock) FastJoinCallCalls() []struct {
-	Ctx             context.Context
-	_type           string
-	ID              string
-	JoinCallRequest models.JoinCallRequest
+	Ctx                 context.Context
+	_type               string
+	ID                  string
+	FastJoinCallRequest models.FastJoinCallRequest
 } {
 	var calls []struct {
-		Ctx             context.Context
-		_type           string
-		ID              string
-		JoinCallRequest models.JoinCallRequest
+		Ctx                 context.Context
+		_type               string
+		ID                  string
+		FastJoinCallRequest models.FastJoinCallRequest
 	}
 	mock.lockFastJoinCall.RLock()
 	calls = mock.calls.FastJoinCall

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -31,6 +33,9 @@ import (
 type bench struct {
 	cfg    config
 	prefix string
+	// sfus are the URLs of the SFUs the bench's calls landed on, which -new-users'
+	// warm Clients preconnect to.
+	sfus []string
 }
 
 func newBench(cfg config) *bench {
@@ -81,6 +86,42 @@ func (b *bench) newClient(user string) (*rtc.Client, error) {
 		return nil, fmt.Errorf("connect %s to the coordinator: %w", user, err)
 	}
 	return c, nil
+}
+
+// runClient builds user's client for a run that does not reuse one. A warm run's client
+// then opens its connections, as an agent's does before its first call.
+func (b *bench) runClient(ctx context.Context, mode, user string) (*rtc.Client, error) {
+	c, err := b.newClient(user)
+	if err != nil {
+		return nil, err
+	}
+	if mode == modeWarm {
+		if err := c.Preconnect(ctx, b.sfus...); err != nil {
+			_ = c.Close()
+			return nil, fmt.Errorf("%s preconnect: %w", user, err)
+		}
+	}
+	return c, nil
+}
+
+// users are the alice and bob of a run of mode and scenario: with -new-users, ones the
+// coordinator has never seen.
+func (b *bench) users(mode, scenario string, run int) (alice, bob string) {
+	if !b.cfg.NewUsers {
+		return b.prefix + "-alice", b.prefix + "-bob"
+	}
+	n := strconv.Itoa(run)
+	if run < 0 {
+		n = "warmup"
+	}
+	prefix := strings.Join([]string{b.prefix, mode, scenario, n}, "-")
+	return prefix + "-alice", prefix + "-bob"
+}
+
+func (b *bench) remember(sfuURL string) {
+	if sfuURL != "" && !slices.Contains(b.sfus, sfuURL) {
+		b.sfus = append(b.sfus, sfuURL)
+	}
 }
 
 // joined is one user in the call.
@@ -206,6 +247,13 @@ func (j *joined) sfu() string {
 	return ""
 }
 
+func (j *joined) sfuURL() string {
+	if s := j.call.GetState(); s != nil {
+		return s.Url
+	}
+	return ""
+}
+
 func (j *joined) leave() {
 	_ = j.call.Leave("joinbench done")
 }
@@ -289,6 +337,7 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 		SFU:       b.cfg.SFU, Location: b.cfg.Location,
 		InjectedRTTMs: ms(b.cfg.RTT), BrokenCandidates: b.cfg.BreakCandidates, BrokenRounds: b.cfg.BreakRounds,
 		SecondJoinDelayMs: ms(b.cfg.SecondJoinDelay), GapMs: ms(b.cfg.Gap),
+		NewUsers: b.cfg.NewUsers,
 	}
 	if b.cfg.ICEPolicy != icePolicyAll {
 		r.ICEPolicy = b.cfg.ICEPolicy
@@ -306,11 +355,12 @@ func (b *bench) runOnce(ctx context.Context, mode, scenario string, cl *clients,
 }
 
 func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients, r *runResult) error {
-	aliceID, bobID := b.prefix+"-alice", b.prefix+"-bob"
+	aliceID, bobID := b.users(mode, scenario, r.Run)
+	fresh := mode == modeCold || b.cfg.NewUsers
 	var err error
-	if mode == modeCold {
+	if fresh {
 		defer cl.close()
-		if cl.alice, err = b.newClient(aliceID); err != nil {
+		if cl.alice, err = b.runClient(ctx, mode, aliceID); err != nil {
 			return err
 		}
 	}
@@ -320,6 +370,7 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 	}
 	defer alice.leave()
 	r.SFU = alice.sfu()
+	b.remember(alice.sfuURL())
 	aliceTrace, err := alice.await(ctx, jointrace.PubRTP)
 	if scenario == scenarioPubSub {
 		r.addTrace(rolePublisher, aliceID, aliceTrace)
@@ -332,8 +383,8 @@ func (b *bench) scenario(ctx context.Context, mode, scenario string, cl *clients
 		return err
 	}
 
-	if mode == modeCold {
-		if cl.bob, err = b.newClient(bobID); err != nil {
+	if fresh {
+		if cl.bob, err = b.runClient(ctx, mode, bobID); err != nil {
 			return err
 		}
 	}
@@ -422,18 +473,22 @@ func connectRTT(traces []roleTrace) float64 {
 }
 
 // runMode runs every scenario of one mode: -runs measured calls each, after one
-// discarded warm-up call in warm mode.
+// discarded warm-up call in warm mode. With -new-users the warm-up only finds the SFUs
+// the runs' new clients preconnect to.
 func (b *bench) runMode(mode string, emit func(runResult)) error {
 	for _, scenario := range b.cfg.Scenarios {
 		cl := &clients{}
 		if mode == modeWarm {
-			var err error
-			if cl.alice, err = b.newClient(b.prefix + "-alice"); err != nil {
-				return err
-			}
-			if cl.bob, err = b.newClient(b.prefix + "-bob"); err != nil {
-				cl.close()
-				return err
+			if !b.cfg.NewUsers {
+				aliceID, bobID := b.users(mode, scenario, -1)
+				var err error
+				if cl.alice, err = b.newClient(aliceID); err != nil {
+					return err
+				}
+				if cl.bob, err = b.newClient(bobID); err != nil {
+					cl.close()
+					return err
+				}
 			}
 			warm := b.measure(mode, scenario, cl, -1)
 			if warm.Error != "" {

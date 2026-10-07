@@ -57,13 +57,18 @@ type fakeCoordinator struct {
 	refuseToken atomic.Pointer[string]
 	// coordOpts are added to the client's coordinator options.
 	coordOpts []coordinator.Option
+	// userName is the name of the clients' user, ws-user.
+	userName string
 
 	// fastJoins receives the query of every fast_join. Until serveFastJoin, fast_join
 	// is a 404, as on a coordinator from before it.
 	fastJoins chan url.Values
 	// fastJoinBodies receives the body of every fast_join.
-	fastJoinBodies chan models.JoinCallRequest
-	candidates     atomic.Pointer[[]models.SFUCandidate]
+	fastJoinBodies chan models.FastJoinCallRequest
+	// createsUsers makes fast_join create an unknown user from its user_details, as the
+	// coordinator does since T44; without it fast_join ignores them, as it did before.
+	createsUsers atomic.Bool
+	candidates   atomic.Pointer[[]models.SFUCandidate]
 	// candidateLimit, when set, is how many candidates fast_join returns, as the
 	// coordinator returns at most 5.
 	candidateLimit atomic.Int32
@@ -150,7 +155,7 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		watches:        make(chan watchRequest, 16),
 		events:         make(chan string, 4),
 		fastJoins:      make(chan url.Values, 4),
-		fastJoinBodies: make(chan models.JoinCallRequest, 4),
+		fastJoinBodies: make(chan models.FastJoinCallRequest, 4),
 		auths:          make(chan string, 64),
 		drops:          make(chan struct{}),
 	}
@@ -277,7 +282,7 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 			return
 		}
 		f.fastJoins <- r.URL.Query()
-		var req models.JoinCallRequest
+		var req models.FastJoinCallRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		select {
 		case f.fastJoinBodies <- req:
@@ -285,10 +290,13 @@ func newFakeCoordinator(t *testing.T, wsDelay time.Duration, unknownUsers bool) 
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Server-Timing", "fastjoin;dur=1.5")
+		if f.createsUsers.Load() && req.UserDetails != nil {
+			f.known.Store(true)
+		}
 		if unknownUser(w) {
 			return
 		}
-		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: f.fastJoinCandidates(req)})
+		_ = json.NewEncoder(w).Encode(models.FastJoinCallResponse{Candidates: f.fastJoinCandidates(req.JoinCallRequest)})
 	})
 	mux.HandleFunc("GET /api/v2/video/call/{type}/{id}", func(w http.ResponseWriter, r *http.Request) {
 		select {
@@ -320,7 +328,7 @@ func (f *fakeCoordinator) client(t *testing.T, opts ...Option) *Client {
 func (f *fakeCoordinator) clientWithToken(t *testing.T, token TokenProvider, opts ...Option) *Client {
 	t.Helper()
 
-	client, err := NewClient("test-api-key", User{ID: "ws-user"}, token,
+	client, err := NewClient("test-api-key", User{ID: "ws-user", Name: f.userName}, token,
 		append([]Option{WithCoordinatorOptions(append([]coordinator.Option{
 			coordinator.ApiURL(f.srv.URL),
 			coordinator.WithWsURL("ws" + strings.TrimPrefix(f.srv.URL, "http") + "/api/v2/connect"),

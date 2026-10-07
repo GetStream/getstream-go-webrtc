@@ -74,6 +74,9 @@ type config struct {
 	// Gap is the pause after each call before the next: in warm mode, how long the
 	// clients' connections sit idle between joins.
 	Gap time.Duration
+	// NewUsers joins every run as users the coordinator has never seen, each with a new
+	// Client: an agent's first join. In warm mode the Client preconnects first.
+	NewUsers bool
 
 	BaseURL   string
 	WSURL     string
@@ -108,6 +111,7 @@ func parseConfig(args []string, getenv func(string) string, output io.Writer) (c
 	fs.DurationVar(&c.SecondJoinDelay, "second-join-delay", 0, "bob joins this long after alice's Join, at the earliest once she publishes (one-to-one: peer_subscribe then times a late joiner reaching a settled participant)")
 	fs.UintVar(&c.AudioSlots, "audio-slots", rtc.DefaultAudioReceiveSlots, "audio receive slots each fast join asks for (0: a later publisher's audio needs a renegotiation)")
 	fs.DurationVar(&c.Gap, "gap", 500*time.Millisecond, "pause after each call before the next; in warm mode, how long the clients sit idle between joins")
+	fs.BoolVar(&c.NewUsers, "new-users", false, "every run joins as new users, with new Clients (an agent's first join); in warm mode each Client preconnects to the SFUs seen so far, then joins")
 	faultFlags(fs, &c)
 	if err := fs.Parse(args); err != nil {
 		return config{}, err

@@ -1,5 +1,14 @@
 package models
 
+// FastJoinCallRequest is join's request, plus the user details of the websocket connect.
+// fast_join creates a user it has never seen from them, as the connect would: a client's
+// first fast_join usually reaches the coordinator before its connect does. A coordinator
+// without the field ignores it.
+type FastJoinCallRequest struct {
+	JoinCallRequest
+	UserDetails *ConnectUserDetailsRequest `json:"user_details,omitempty"`
+}
+
 // FastJoinCallResponse is the coordinator's answer to fast_join: the call state join
 // returns, plus the SFUs the client may join, in the order to try them. The coordinator
 // makes no call to any SFU: the first SFU the client reaches creates the call from the
