@@ -231,10 +231,15 @@ func (s *subscriber) OnFailed(info pc.ConnectionInfo) {
 }
 
 func (s *subscriber) OnTrack(track *webrtc.TrackRemote, rtpReceiver *webrtc.RTPReceiver) {
-	participant, trackType := s.c.store.Load().LookupParticipantByTrack(track.StreamID())
-	publisherParticipantID := ParticipantID{
-		UserID:    participant.UserID,
-		SessionID: participant.SessionID,
+	participant, trackType := s.trackOwner(track.StreamID())
+	var publisherParticipantID ParticipantID
+	if participant != nil {
+		publisherParticipantID = ParticipantID{
+			UserID:    participant.UserID,
+			SessionID: participant.SessionID,
+		}
+	} else {
+		s.logger.Warnw("a track arrived from a participant the call does not know", nil, "stream", track.StreamID())
 	}
 	entry := subscribedTrackEntry{
 		SSRC:      track.SSRC(),
@@ -254,6 +259,24 @@ func (s *subscriber) OnTrack(track *webrtc.TrackRemote, rtpReceiver *webrtc.RTPR
 		WriteRTCP:     s.PC.WriteRTCP,
 	})
 	s.Tracing.Load().Emit(rtcstats.PeerOnTrackEvent, fmt.Sprintf("%s:%s stream:%s", track.Kind(), track.ID(), track.StreamID()))
+}
+
+// trackOwnerWait is how long a track may wait for the participant who published it. The
+// SFU can deliver media before the event that announces its publisher, and a busy client
+// is further behind on those events.
+const trackOwnerWait = 2 * time.Second
+
+// trackOwner is the participant who published a track, waiting a moment for one the store
+// has not heard of yet. It is nil if they never arrive.
+func (s *subscriber) trackOwner(streamID string) (*Participant, sfu_models.TrackType) {
+	deadline := time.Now().Add(trackOwnerWait)
+	for {
+		participant, trackType := s.c.store.Load().LookupParticipantByTrack(streamID)
+		if participant != nil || time.Now().After(deadline) {
+			return participant, trackType
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 // OnOffer should never fire: the subscriber only ever answers offers the SFU
