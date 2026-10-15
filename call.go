@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"runtime/debug"
 	"slices"
@@ -1809,9 +1810,10 @@ func (c *Call) collectTracing(buf *bytebufferpool.ByteBuffer) {
 
 // decodeRtcStats round-trips a getStats map through JSON so delta compression
 // sees plain map[string]any records rather than the typed pion structs the
-// collectors produce. It returns two independent decodes of the same bytes: one
-// to compress and emit, and one to keep as the baseline for the next tick.
-// Compression mutates its argument, so the baseline cannot be that same map.
+// collectors produce. It returns the decode to compress and emit, and a copy to
+// keep as the baseline for the next tick. Compression deletes keys from each
+// record and overwrites timestamps but never touches a nested value, so copying
+// the top two levels is enough to keep the baseline uncompressed.
 func decodeRtcStats(stats map[string]any) (report, snapshot map[string]any, err error) {
 	buf := bytebufferpool.Get()
 	defer bytebufferpool.Put(buf)
@@ -1822,8 +1824,12 @@ func decodeRtcStats(stats map[string]any) (report, snapshot map[string]any, err 
 	if err := json.Unmarshal(buf.Bytes(), &report); err != nil {
 		return nil, nil, err
 	}
-	if err := json.Unmarshal(buf.Bytes(), &snapshot); err != nil {
-		return nil, nil, err
+	snapshot = make(map[string]any, len(report))
+	for id, val := range report {
+		if record, ok := val.(map[string]any); ok {
+			val = maps.Clone(record)
+		}
+		snapshot[id] = val
 	}
 	return report, snapshot, nil
 }

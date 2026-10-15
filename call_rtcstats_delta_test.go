@@ -9,6 +9,7 @@ import (
 	"time"
 
 	sfu_signal_rpc "github.com/GetStream/protocol/protobuf/video/sfu/signal_rpc"
+	"github.com/pion/webrtc/v4"
 	"github.com/stretchr/testify/require"
 	"github.com/twitchtv/twirp"
 )
@@ -156,6 +157,30 @@ func TestReportRtcStatsDeltaCompressionAcrossTicks(t *testing.T) {
 				"retained baseline record %q must be uncompressed", id)
 			require.Contains(t, rec, "type",
 				"retained baseline record %q must be uncompressed", id)
+		}
+	}
+}
+
+// BenchmarkDecodeRtcStats decodes the records one audio peer connection reports
+// each tick.
+func BenchmarkDecodeRtcStats(b *testing.B) {
+	stats := map[string]any{
+		"OT01":   webrtc.OutboundRTPStreamStats{ID: "OT01", Type: webrtc.StatsTypeOutboundRTP, Kind: "audio", SSRC: 1, PacketsSent: 5000, BytesSent: 400000},
+		"IT01":   webrtc.InboundRTPStreamStats{ID: "IT01", Type: webrtc.StatsTypeInboundRTP, Kind: "audio", SSRC: 2, PacketsReceived: 5000, BytesReceived: 400000},
+		"RI01":   webrtc.RemoteInboundRTPStreamStats{ID: "RI01", Type: webrtc.StatsTypeRemoteInboundRTP, Kind: "audio", SSRC: 1},
+		"CP01":   webrtc.ICECandidatePairStats{ID: "CP01", Type: webrtc.StatsTypeCandidatePair, State: webrtc.StatsICECandidatePairStateSucceeded, Nominated: true},
+		"CL01":   webrtc.ICECandidateStats{ID: "CL01", Type: webrtc.StatsTypeLocalCandidate, IP: "10.0.0.1", Port: 40000, Protocol: "udp"},
+		"CR01":   webrtc.ICECandidateStats{ID: "CR01", Type: webrtc.StatsTypeRemoteCandidate, IP: "10.0.0.2", Port: 3478, Protocol: "udp"},
+		"COT01":  webrtc.CodecStats{ID: "COT01", Type: webrtc.StatsTypeCodec, PayloadType: 111, MimeType: "audio/opus", ClockRate: 48000, Channels: 2},
+		"T01":    webrtc.TransportStats{ID: "T01", Type: webrtc.StatsTypeTransport, BytesSent: 400000, BytesReceived: 400000},
+		"PC":     webrtc.PeerConnectionStats{ID: "PC", Type: webrtc.StatsTypePeerConnection, DataChannelsOpened: 0},
+		"MS01":   webrtc.MediaStreamStats{ID: "MS01", Type: webrtc.StatsTypeStream, StreamIdentifier: "s", TrackIDs: []string{"t"}},
+		"CERT01": webrtc.CertificateStats{ID: "CERT01", Type: webrtc.StatsTypeCertificate, Fingerprint: "AA:BB", FingerprintAlgorithm: "sha-256"},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, _, err := decodeRtcStats(stats); err != nil {
+			b.Fatal(err)
 		}
 	}
 }
